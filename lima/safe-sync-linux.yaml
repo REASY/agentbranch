@@ -1,0 +1,52 @@
+minimumLimaVersion: "2.1.0"
+
+base:
+  - template:docker-rootful
+
+vmType: qemu
+ssh:
+  forwardAgent: false
+  loadDotSSHPubKeys: false
+
+mounts: []
+
+portForwards:
+  - guestIP: "127.0.0.1"
+    guestPortRange: [1, 65535]
+    proto: "any"
+    ignore: true
+  - guestIP: "0.0.0.0"
+    guestPortRange: [1, 65535]
+    proto: "any"
+    ignore: true
+
+provision:
+  - mode: system
+    file: provision/00-system.sh
+  - mode: system
+    file: provision/05-network-guard.sh
+  - mode: system
+    file: provision/10-agent-clis.sh
+  - mode: system
+    file: provision/20-docker-compose.sh
+
+probes:
+  - mode: readiness
+    description: "agbranch runtime readiness"
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+
+      runtime_ready() {
+        command -v tmux >/dev/null 2>&1 || return 1
+        command -v node >/dev/null 2>&1 || return 1
+        node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)' >/dev/null 2>&1 || return 1
+        codex --version >/dev/null 2>&1 || return 1
+        claude --version >/dev/null 2>&1 || return 1
+        gemini --version >/dev/null 2>&1 || return 1
+        docker compose version >/dev/null 2>&1 || return 1
+      }
+
+      until runtime_ready; do
+        sleep 2
+      done
