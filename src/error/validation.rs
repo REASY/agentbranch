@@ -119,7 +119,7 @@ pub enum ValidationError {
 
     #[error(
         "provider CLI `{name}` is unavailable in the prepared base; \
-         run `agbranch prepare --rebuild`"
+         run `agbranch base prepare --rebuild`"
     )]
     ProviderCliMissing { name: String },
 

@@ -17,7 +17,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    Prepare(PrepareArgs),
+    Base(BaseArgs),
     Launch(LaunchArgs),
     Open(OpenArgs),
     Export(ExportArgs),
@@ -41,6 +41,18 @@ pub enum Command {
 }
 
 #[derive(Debug, Args)]
+pub struct BaseArgs {
+    #[command(subcommand)]
+    pub action: BaseAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BaseAction {
+    Prepare(PrepareArgs),
+    Show(BaseShowArgs),
+}
+
+#[derive(Debug, Args)]
 pub struct PrepareArgs {
     #[arg(long)]
     pub rebuild: bool,
@@ -48,6 +60,14 @@ pub struct PrepareArgs {
     pub timeout: Duration,
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct BaseShowArgs {
+    #[arg(long)]
+    pub json: bool,
+    #[arg(long)]
+    pub require_ready: bool,
 }
 
 #[derive(Debug, Args)]
@@ -319,10 +339,13 @@ mod tests {
 
     #[test]
     fn prepare_defaults_timeout_to_twenty_minutes() {
-        let cli = Cli::parse_from(["agbranch", "prepare"]);
+        let cli = Cli::parse_from(["agbranch", "base", "prepare"]);
 
-        let Command::Prepare(args) = cli.command else {
-            panic!("expected prepare command");
+        let Command::Base(args) = cli.command else {
+            panic!("expected base command");
+        };
+        let BaseAction::Prepare(args) = args.action else {
+            panic!("expected base prepare command");
         };
 
         assert_eq!(args.timeout, Duration::from_secs(20 * 60));
@@ -330,12 +353,52 @@ mod tests {
 
     #[test]
     fn prepare_accepts_explicit_timeout_override() {
-        let cli = Cli::parse_from(["agbranch", "prepare", "--timeout", "35m"]);
+        let cli = Cli::parse_from(["agbranch", "base", "prepare", "--timeout", "35m"]);
 
-        let Command::Prepare(args) = cli.command else {
-            panic!("expected prepare command");
+        let Command::Base(args) = cli.command else {
+            panic!("expected base command");
+        };
+        let BaseAction::Prepare(args) = args.action else {
+            panic!("expected base prepare command");
         };
 
         assert_eq!(args.timeout, Duration::from_secs(35 * 60));
+    }
+
+    #[test]
+    fn base_prepare_accepts_existing_prepare_flags() {
+        let cli = Cli::parse_from(["agbranch", "base", "prepare", "--timeout", "35m", "--json"]);
+
+        let Command::Base(args) = cli.command else {
+            panic!("expected base command");
+        };
+        let BaseAction::Prepare(args) = args.action else {
+            panic!("expected base prepare command");
+        };
+
+        assert_eq!(args.timeout, Duration::from_secs(35 * 60));
+        assert!(args.json);
+    }
+
+    #[test]
+    fn base_show_accepts_json_and_require_ready() {
+        let cli = Cli::parse_from(["agbranch", "base", "show", "--json", "--require-ready"]);
+
+        let Command::Base(args) = cli.command else {
+            panic!("expected base command");
+        };
+        let BaseAction::Show(args) = args.action else {
+            panic!("expected base show command");
+        };
+
+        assert!(args.json);
+        assert!(args.require_ready);
+    }
+
+    #[test]
+    fn top_level_prepare_is_not_accepted() {
+        let err = Cli::try_parse_from(["agbranch", "prepare"]).expect_err("prepare is removed");
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
     }
 }

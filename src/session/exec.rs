@@ -468,6 +468,7 @@ mod tests {
                     cpus: None,
                     memory: None,
                     disk: None,
+                    protected: false,
                     ssh_local_port: None,
                     ssh_address: None,
                     config: LimaConfig::default(),

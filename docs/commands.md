@@ -4,11 +4,12 @@ Every `agbranch` subcommand, grouped by what you're trying to do. For full flag 
 
 | Group         | Command                  | What it does                                                                                 |
 |---------------|--------------------------|----------------------------------------------------------------------------------------------|
-| **Setup**     | `prepare`                | Build or refresh the prepared base VM for your host (`--rebuild`, `--timeout`, `--json`).    |
+| **Setup**     | `base prepare`           | Build or refresh the prepared base VM for your host (`--rebuild`, `--timeout`, `--json`).   |
 |               | `doctor`                 | Validate host: `limactl` version, platform prerequisites, orphaned VMs.                      |
 | **Create**    | `launch`                 | Start a sandbox session, optionally `--seed` and `--agent`.                                  |
 |               | `open`                   | Start a git-native repo session on `--repo <path>`, optionally `--base <ref>` and `--agent`. |
 | **Inspect**   | `ps`                     | List sessions with live status; `--all`, `--search`, `--state`, `--sort`.                    |
+|               | `base show`              | Show the current prepared base VM, readiness, fingerprint, and sizing (`--json`).            |
 |               | `show`                   | Structured detail for a single session (mode, refs, provider, tmux, VM).                    |
 |               | `logs`                   | Stream one of: `events`, `provision`, `sync`, `guest`, `kernel`. `--follow` tails.           |
 |               | `watch`                  | Continuous state stream; snapshots on change plus event lines.                               |

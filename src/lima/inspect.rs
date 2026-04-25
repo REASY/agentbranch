@@ -22,6 +22,8 @@ pub struct LimaInstance {
     pub memory: Option<u64>,
     #[serde(default)]
     pub disk: Option<u64>,
+    #[serde(default)]
+    pub protected: bool,
     #[serde(rename = "sshLocalPort", default)]
     pub ssh_local_port: Option<u16>,
     #[serde(rename = "sshAddress", default)]

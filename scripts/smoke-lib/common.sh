@@ -114,7 +114,7 @@ assert_prepared_base_exists() {
   if ! jq -s -e --arg name "${PREPARED_BASE_NAME}" \
     'map(if type == "array" then .[] else . end) | .[] | select(.name == $name)' \
     "${list_file}" >/dev/null; then
-    printf "missing prepared base: %s; run '%s prepare' before smoke-e2e\n" \
+    printf "missing prepared base: %s; run '%s base prepare' before smoke-e2e\n" \
       "${PREPARED_BASE_NAME}" "${AGBRANCH_BIN}" >&2
     exit 1
   fi

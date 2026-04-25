@@ -26,7 +26,7 @@ Run the smoke suite locally:
 
 ```bash
 cargo build
-./target/debug/agbranch prepare
+./target/debug/agbranch base prepare
 scripts/smoke-e2e.sh --binary ./target/debug/agbranch
 ```
 

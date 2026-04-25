@@ -5,7 +5,8 @@ use predicates::prelude::*;
 fn help_lists_the_expected_subcommands() {
     let mut cmd = Command::cargo_bin("agbranch").expect("binary should build");
     cmd.arg("--help").assert().success().stdout(
-        predicate::str::contains("prepare")
+        predicate::str::contains("base")
+            .and(predicate::str::contains("prepare").not())
             .and(predicate::str::contains("open"))
             .and(predicate::str::contains("ps"))
             .and(predicate::str::contains("show"))

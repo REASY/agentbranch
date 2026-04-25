@@ -36,7 +36,7 @@ flowchart LR
 
   agent["Codex / Claude / Gemini<br/>session-owned"]
 
-  cli -->|prepare| base
+  cli -->|base prepare| base
   cli -->|launch / open| vm
   base -->|clone per session| vm
   repo -->|seed clone on open| vm
@@ -45,7 +45,7 @@ flowchart LR
   vm --- agent
 ```
 
-One `prepare` builds a reusable base VM with Node 20+, `tmux`, Docker Compose, and the agent CLIs preinstalled. Language-specific toolchains such as Rust, Python, and JVM are not baked into the shipped base. Every `launch` or `open` clones that base into a fresh per-session VM. Repo sessions additionally capture your HEAD, reserve a review branch named `agbranch/<session>`, and write two hidden refs under `refs/agbranch/sessions/<session>/{base,head}` so the sync-back can verify lineage before fast-forwarding anything on the host.
+One `base prepare` builds a reusable base VM with Node 20+, `tmux`, Docker Compose, and the agent CLIs preinstalled. Language-specific toolchains such as Rust, Python, and JVM are not baked into the shipped base. Every `launch` or `open` clones that base into a fresh per-session VM. Repo sessions additionally capture your HEAD, reserve a review branch named `agbranch/<session>`, and write two hidden refs under `refs/agbranch/sessions/<session>/{base,head}` so the sync-back can verify lineage before fast-forwarding anything on the host.
 
 ---
 
@@ -57,11 +57,11 @@ Short version: the isolation boundary has to sit **below the layer the agent can
 - **MicroVMs (Firecracker, Cloud Hypervisor)** give you that hardware boundary in ~125 ms and <5 MiB — the right shape for Lambda-style functions and ephemeral CI jobs. They are the wrong shape for `agbranch`:
   - Firecracker's minimal VMM — five emulated devices, no nested KVM, no GPU, no `/dev/kvm` in the guest — can't cleanly host **Docker Compose inside the session**, which repo sessions use. Cloud Hypervisor can, at the cost of a larger VMM surface and real integration work.
   - Firecracker and Cloud Hypervisor are Linux/KVM-only. `agbranch` targets developer laptops, where Lima's `vmType: vz` + Rosetta is a native-feeling Linux guest on Apple Silicon; no microVM stack gives us that out of the box.
-  - MicroVMs optimize millisecond cold start. `agbranch` sessions are interactive — tmux windows, attached agents, minutes-to-hours lifetimes — and the "one `prepare`, many clones-of-base" model already amortizes most of the boot-time gap.
+  - MicroVMs optimize millisecond cold start. `agbranch` sessions are interactive — tmux windows, attached agents, minutes-to-hours lifetimes — and the "one `base prepare`, many clones-of-base" model already amortizes most of the boot-time gap.
 - **gVisor** pushes the kernel into user space and shrinks the host syscall surface to fewer than 70, which is excellent for GPU inference via `nvproxy`. It also breaks on any unimplemented syscall or kernel feature — and a shell where an agent can run arbitrary Linux programs is exactly that kind of workload. Google Cloud Run moved its second-gen runtime off gVisor onto microVMs for the same reason.
 - **Kata Containers** is the right answer for "microVM-per-pod in Kubernetes," not for a developer laptop.
 
-The honest trade-off: a full Lima VM has a larger VMM attack surface than Firecracker and boots in seconds rather than milliseconds. In return we get a real Linux guest where `git`, `tmux`, and `docker compose` just work, a cross-platform story that covers macOS and Linux with one tool, and a clean `prepare`-once, clone-many lifecycle that turns per-session startup into a git-and-tmux operation instead of a VM build. The VM boundary, not in-guest denylists, is what contains the agent.
+The honest trade-off: a full Lima VM has a larger VMM attack surface than Firecracker and boots in seconds rather than milliseconds. In return we get a real Linux guest where `git`, `tmux`, and `docker compose` just work, a cross-platform story that covers macOS and Linux with one tool, and a clean `base prepare`-once, clone-many lifecycle that turns per-session startup into a git-and-tmux operation instead of a VM build. The VM boundary, not in-guest denylists, is what contains the agent.
 
 Background reading: [MicroVM isolation for AI agents (2026)](https://emirb.github.io/blog/microvm-2026/).
 
@@ -91,7 +91,7 @@ There is no crates.io publication, Homebrew tap, or GitHub Release channel yet. 
   - **Linux** — QEMU plus read/write access to `/dev/kvm`
 - For the end-to-end smoke suite only: `jq`, `sqlite3`, `timeout` (or `gtimeout`)
 
-Run `agbranch doctor` to validate the host before your first `prepare`.
+Run `agbranch doctor` to validate the host before your first `base prepare`.
 
 ---
 
@@ -99,7 +99,7 @@ Run `agbranch doctor` to validate the host before your first `prepare`.
 
 ```bash
 # One-time: build the prepared base VM for your host (~10-20 minutes on first run).
-agbranch prepare
+agbranch base prepare
 
 # Sandbox session — seeded, disposable, exit with --discard.
 # With --agent and no --json, agbranch attaches to the agent window immediately:
@@ -164,7 +164,7 @@ Coding agents aren't installed on your host — they're installed in the prepare
 
 When auth/config is available, `agbranch` may import it into the guest after confirmation, and session-owned providers run inside the VM with permissive defaults. The VM boundary protects the host, not any credentials imported into the guest.
 
-The readiness probe for the prepared base verifies `codex --version`, `claude --version`, `gemini --version`, Node `>= 20`, `tmux`, and `docker compose version` — so if `prepare` completes, the runtime prerequisites for the supported agent CLIs are in place.
+The readiness probe for the prepared base verifies `codex --version`, `claude --version`, `gemini --version`, Node `>= 20`, `tmux`, and `docker compose version` — so if `base prepare` completes, the runtime prerequisites for the supported agent CLIs are in place.
 
 ---
 
@@ -178,6 +178,6 @@ The readiness probe for the prepared base verifies `codex --version`, `claude --
 
 ## Status
 
-`agbranch 0.1.0` is under active development. The workflows and JSON contracts described above are exercised by CI on every push and by the nightly smoke suite against real Lima VMs — but no semver guarantees are made yet, and there is no published binary channel. If you want to try it, build from source and start with `agbranch doctor` and `agbranch prepare`.
+`agbranch 0.1.0` is under active development. The workflows and JSON contracts described above are exercised by CI on every push and by the nightly smoke suite against real Lima VMs — but no semver guarantees are made yet, and there is no published binary channel. If you want to try it, build from source and start with `agbranch doctor` and `agbranch base prepare`.
 
 ---

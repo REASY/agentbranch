@@ -1,6 +1,8 @@
 use crate::cli::JsonFlag;
 use crate::db::sessions::list_sessions;
 use crate::error::{AppError, ValidationError};
+use crate::lima::base_info::{BaseSummary, ReadinessIssue, summarize_expected_base};
+use crate::lima::fingerprint::CURRENT_PROVISION_FINGERPRINT;
 use crate::lima::instance::list_instances;
 use crate::platform::host::{DoctorChecks, HostPrereqs, collect_host_prereqs};
 use crate::provider::import::detect_host_files;
@@ -20,6 +22,7 @@ pub fn render_json(
     lima_version: Option<&str>,
     state_root: &str,
     provider_config_paths: &BTreeMap<String, Vec<String>>,
+    prepared_base: &BaseSummary,
     messages: &[String],
 ) -> Result<String, serde_json::Error> {
     serde_json::to_string(&serde_json::json!({
@@ -28,6 +31,7 @@ pub fn render_json(
         "lima_version": lima_version,
         "state_root": state_root,
         "provider_config_paths": provider_config_paths,
+        "prepared_base": prepared_base,
         "messages": messages,
     }))
 }
@@ -48,9 +52,19 @@ pub fn run(args: JsonFlag) -> Result<(), AppError> {
         }
     };
 
+    let mut prepared_base =
+        summarize_expected_base(host.platform, &[], CURRENT_PROVISION_FINGERPRINT);
     if prereqs.lima_available {
         match list_instances(&runner) {
             Ok(instances) => {
+                prepared_base = summarize_expected_base(
+                    host.platform,
+                    &instances,
+                    CURRENT_PROVISION_FINGERPRINT,
+                );
+                if let Some(advisory) = prepared_base_advisory(&prepared_base) {
+                    report.messages.push(advisory.to_owned());
+                }
                 let session_vm_names = if let Some(conn) = conn.as_ref() {
                     match list_sessions(conn) {
                         Ok(rows) => rows
@@ -108,6 +122,7 @@ pub fn run(args: JsonFlag) -> Result<(), AppError> {
                     .as_deref(),
                 host.state_roots.base.to_string_lossy().as_ref(),
                 &provider_config_paths,
+                &prepared_base,
                 &report.messages,
             )
             .map_err(crate::error::observability::ObservabilityError::Json)?
@@ -140,6 +155,22 @@ pub fn run(args: JsonFlag) -> Result<(), AppError> {
         Err(AppError::Validation(ValidationError::DoctorReportIssues {
             messages: report.messages.join("; "),
         }))
+    }
+}
+
+fn prepared_base_advisory(summary: &BaseSummary) -> Option<&'static str> {
+    match summary.readiness_issue() {
+        Some(ReadinessIssue::Missing) => Some("prepared base missing: run agbranch base prepare"),
+        Some(ReadinessIssue::MetadataMissing) => {
+            Some("prepared base metadata missing: run agbranch base prepare")
+        }
+        Some(ReadinessIssue::Stale) => {
+            Some("prepared base stale: run agbranch base prepare --rebuild")
+        }
+        Some(ReadinessIssue::Unprotected) => {
+            Some("prepared base unprotected: run agbranch base prepare")
+        }
+        None => None,
     }
 }
 
@@ -180,6 +211,7 @@ fn inspect_catalog(path: &std::path::Path) -> Result<Option<Connection>, rusqlit
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lima::base_info::BaseSummary;
     use std::collections::BTreeMap;
 
     #[test]
@@ -189,12 +221,29 @@ mod tests {
             "codex".to_owned(),
             vec!["/Users/tester/.codex/auth.json".to_owned()],
         );
+        let prepared_base = BaseSummary {
+            name: "agbranch-base-macos".to_owned(),
+            name_source: "default".to_owned(),
+            status: "missing".to_owned(),
+            location: None,
+            protected: false,
+            prepared: false,
+            size_bytes: None,
+            disk_bytes: None,
+            created_at: None,
+            prepared_at: None,
+            provision_fingerprint: "sha256:current".to_owned(),
+            prepared_provision_fingerprint: None,
+            provision_stale: None,
+            agent_cli_versions: BTreeMap::new(),
+        };
         let rendered = render_json(
             true,
             "macos",
             Some("2.1.1"),
             "/tmp/agbranch-smoke-state",
             &provider_configs,
+            &prepared_base,
             &[String::from("ready")],
         )
         .expect("render json");
@@ -205,17 +254,36 @@ mod tests {
         assert!(rendered.contains(
             "\"provider_config_paths\":{\"codex\":[\"/Users/tester/.codex/auth.json\"]}"
         ));
+        let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid json");
+        assert_eq!(value["prepared_base"]["name"], "agbranch-base-macos");
         assert!(rendered.contains("\"messages\":[\"ready\"]"));
     }
 
     #[test]
     fn doctor_json_contains_required_machine_fields() {
+        let prepared_base = BaseSummary {
+            name: "agbranch-base-macos".to_owned(),
+            name_source: "default".to_owned(),
+            status: "stopped".to_owned(),
+            location: Some("/tmp/agbranch-base-macos".to_owned()),
+            protected: true,
+            prepared: true,
+            size_bytes: Some(1),
+            disk_bytes: Some(2),
+            created_at: Some("2026-04-25T00:00:00Z".to_owned()),
+            prepared_at: Some("2026-04-25T00:01:00Z".to_owned()),
+            provision_fingerprint: "sha256:current".to_owned(),
+            prepared_provision_fingerprint: Some("sha256:current".to_owned()),
+            provision_stale: Some(false),
+            agent_cli_versions: BTreeMap::new(),
+        };
         let rendered = render_json(
             true,
             "macos",
             Some("2.1.1"),
             "/tmp/agbranch-smoke-state",
             &BTreeMap::new(),
+            &prepared_base,
             &[String::from("ready")],
         )
         .expect("doctor json");
@@ -225,5 +293,40 @@ mod tests {
         assert_eq!(value["platform"], "macos");
         assert_eq!(value["lima_version"], "2.1.1");
         assert_eq!(value["state_root"], "/tmp/agbranch-smoke-state");
+        assert_eq!(value["prepared_base"]["status"], "stopped");
+    }
+
+    #[test]
+    fn prepared_base_advisory_is_mutually_exclusive_and_prioritized() {
+        let mut stale = BaseSummary {
+            name: "agbranch-base-macos".to_owned(),
+            name_source: "default".to_owned(),
+            status: "stopped".to_owned(),
+            location: Some("/tmp/agbranch-base-macos".to_owned()),
+            protected: true,
+            prepared: true,
+            size_bytes: None,
+            disk_bytes: None,
+            created_at: None,
+            prepared_at: Some("2026-04-25T00:01:00Z".to_owned()),
+            provision_fingerprint: "sha256:current".to_owned(),
+            prepared_provision_fingerprint: Some("sha256:old".to_owned()),
+            provision_stale: Some(true),
+            agent_cli_versions: BTreeMap::new(),
+        };
+        assert_eq!(
+            prepared_base_advisory(&stale),
+            Some("prepared base stale: run agbranch base prepare --rebuild")
+        );
+
+        stale.status = "missing".to_owned();
+        stale.prepared = false;
+        stale.protected = false;
+        stale.prepared_provision_fingerprint = None;
+        stale.provision_stale = None;
+        assert_eq!(
+            prepared_base_advisory(&stale),
+            Some("prepared base missing: run agbranch base prepare")
+        );
     }
 }

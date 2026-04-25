@@ -16,4 +16,10 @@ pub enum LimaError {
     },
     #[error("prepared base instance `{0}` was not found")]
     MissingPreparedBase(String),
+    #[error("failed to write prepared base metadata at `{path}`: {source}")]
+    BaseMetadata {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
 }

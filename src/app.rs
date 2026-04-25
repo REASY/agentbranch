@@ -1,13 +1,13 @@
 use crate::cli::{Cli, Command};
 use crate::commands::{
-    agent, attach, close, doctor, export, gc, kill, launch, logs, open, prepare, ps, repair, run,
+    agent, attach, base, close, doctor, export, gc, kill, launch, logs, open, ps, repair, run,
     shell, show, ssh, start, stop, sync_back, watch,
 };
 use crate::error::AppError;
 
 pub fn run(cli: Cli) -> Result<(), AppError> {
     match cli.command {
-        Command::Prepare(args) => prepare::run(args),
+        Command::Base(args) => base::run(args),
         Command::Launch(args) => launch::run(args),
         Command::Open(args) => open::run(args),
         Command::Export(args) => export::run(args),

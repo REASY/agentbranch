@@ -2,6 +2,7 @@ use crate::cli::OpenArgs;
 use crate::commands::agent::{
     SessionOwnedAgentLaunch, auth_prompt_enabled, start_session_owned_agent_with,
 };
+use crate::commands::base::{acquire_clone_lock_for_prepared_base, emit_prepared_base_notice};
 use crate::commands::session_slot::ensure_runtime_session_slot_available;
 use crate::db::connect::open_catalog;
 use crate::db::locks::SessionLock;
@@ -16,11 +17,8 @@ use crate::git::session_refs::{
     hidden_ref_names, initialize_session_refs, resolve_base_ref, resolve_ref_oid,
     review_branch_name,
 };
-use crate::lima::{
-    base,
-    client::{LimaClient, LimactlClient},
-    instance, shell,
-};
+use crate::lima::client::{LimaClient, LimactlClient};
+use crate::lima::shell;
 use crate::platform::host::HostContext;
 use crate::session::guest_support;
 use crate::session::orchestration::{LockMetadataGuard, SessionGuard, run_step};
@@ -210,9 +208,18 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
                 )
             },
         )?;
-        run_step(&session_name, "open", "prepare-base", &open_started, || {
-            Ok(ensure_prepared_base(&runner, host.platform, false)?)
-        })?;
+        let base_clone_lock =
+            run_step(&session_name, "open", "prepare-base", &open_started, || {
+                let mut on_notice =
+                    |notice| emit_prepared_base_notice(&catalog, &session_name, &notice);
+                acquire_clone_lock_for_prepared_base(
+                    &runner,
+                    &host,
+                    "open clone",
+                    "open prepare-base",
+                    &mut on_notice,
+                )
+            })?;
         run_step(&session_name, "open", "clone-vm", &open_started, || {
             Ok(lima.clone_instance(
                 &prepared_base_name(host.platform),
@@ -222,6 +229,7 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
                 args.disk.as_ref(),
             )?)
         })?;
+        drop(base_clone_lock);
         run_step(&session_name, "open", "start-vm", &open_started, || {
             Ok(lima.start_instance(&vm_name)?)
         })?;
@@ -373,24 +381,6 @@ fn configure_guest_identity(
             None,
             &BTreeMap::new(),
         )?;
-    Ok(())
-}
-
-fn ensure_prepared_base(
-    runner: &RealCommandRunner,
-    platform: crate::platform::detect::HostPlatform,
-    rebuild: bool,
-) -> Result<(), crate::error::lima::LimaError> {
-    let base_name = prepared_base_name(platform);
-    let instances = instance::list_instances(runner)?;
-    if let Some(existing) = instances
-        .iter()
-        .find(|item| item.name == base_name.as_str())
-        && !base::prepared_base_requires_rebuild(existing)
-    {
-        return Ok(());
-    }
-    let _ = base::prepare_base(runner, platform, rebuild)?;
     Ok(())
 }
 

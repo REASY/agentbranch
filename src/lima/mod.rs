@@ -1,6 +1,8 @@
 pub mod base;
+pub mod base_info;
 pub mod client;
 pub mod copy;
+pub mod fingerprint;
 pub mod inspect;
 pub mod instance;
 pub mod shell;

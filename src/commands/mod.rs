@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod attach;
+pub mod base;
 pub mod close;
 pub mod doctor;
 pub mod export;

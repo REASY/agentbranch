@@ -1,9 +1,14 @@
+use crate::lima::base_info::{
+    BaseMetadata, format_rfc3339_seconds, metadata_path, write_metadata_atomic,
+};
+use crate::lima::fingerprint::CURRENT_PROVISION_FINGERPRINT;
 use crate::lima::inspect::{LimaInstance, LimaInstanceStatus};
 use crate::platform::detect::HostPlatform;
 use crate::provider::registry::{provider_spec, supported_providers};
 use crate::types::VmName;
 use crate::util::ids::prepared_base_name;
 use crate::util::process::CommandRunner;
+use crate::util::time::utc_now;
 use crate::{error::lima::LimaError, error::process::ProcessError, lima::instance};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -157,7 +162,7 @@ where
     let template = safe_sync_template(platform);
     let instances = instance::list_instances(runner)?;
     let existing = instances.iter().find(|item| item.name == base.as_str());
-    let steps = prepare_steps_for_existing(existing, rebuild);
+    let steps = prepare_report_steps_for_existing(existing, rebuild);
     let mut agent_cli_versions = BTreeMap::new();
     for step in &steps {
         on_step(step);
@@ -170,6 +175,12 @@ where
                 instance::probe_instance(runner, &base)?;
                 agent_cli_versions = collect_agent_cli_versions(runner, &base);
             }
+            "metadata" => {
+                if let Err(err) = write_base_metadata(runner, &base, &agent_cli_versions) {
+                    let _ = instance::stop_instance(runner, &base);
+                    return Err(err);
+                }
+            }
             "stop" => instance::stop_instance(runner, &base)?,
             "protect" => instance::protect_instance(runner, &base)?,
             _ => {}
@@ -178,6 +189,40 @@ where
     Ok(PreparedBaseReport {
         steps,
         agent_cli_versions,
+    })
+}
+
+fn prepare_report_steps_for_existing(
+    existing: Option<&LimaInstance>,
+    rebuild: bool,
+) -> Vec<&'static str> {
+    let mut steps = prepare_steps_for_existing(existing, rebuild);
+    if let Some(index) = steps.iter().position(|step| *step == "probe") {
+        steps.insert(index + 1, "metadata");
+    }
+    steps
+}
+
+fn write_base_metadata(
+    runner: &dyn CommandRunner,
+    base: &VmName,
+    agent_cli_versions: &BTreeMap<String, String>,
+) -> Result<(), LimaError> {
+    let instances = instance::list_instances(runner)?;
+    let instance = instances
+        .iter()
+        .find(|instance| instance.name == base.as_str())
+        .ok_or_else(|| LimaError::MissingPreparedBase(base.as_str().to_owned()))?;
+    let instance_dir = PathBuf::from(&instance.instance_dir);
+    let metadata = BaseMetadata {
+        schema_version: 1,
+        prepared_at: format_rfc3339_seconds(utc_now().as_offset_date_time()),
+        provision_fingerprint: CURRENT_PROVISION_FINGERPRINT.to_owned(),
+        agent_cli_versions: agent_cli_versions.clone(),
+    };
+    write_metadata_atomic(&instance_dir, &metadata).map_err(|source| LimaError::BaseMetadata {
+        path: metadata_path(&instance_dir).display().to_string(),
+        source,
     })
 }
 
@@ -375,11 +420,14 @@ fn summarize_provision_failure_detail(block: &[&str]) -> String {
 mod tests {
     use super::*;
     use crate::error::process::ProcessError;
+    use crate::lima::base_info::read_metadata;
     use crate::lima::inspect::{LimaConfig, LimaInstance, LimaInstanceStatus, LimaMount};
     use crate::platform::detect::HostPlatform;
     use crate::util::process::{CommandOutput, CommandRunner};
     use std::cell::RefCell;
+    use std::fs;
     use std::path::Path;
+    use tempfile::TempDir;
 
     #[test]
     fn rebuild_prepare_flow_stops_and_protects_the_base() {
@@ -424,6 +472,7 @@ mod tests {
             cpus: None,
             memory: None,
             disk: None,
+            protected: false,
             ssh_local_port: None,
             ssh_address: None,
             config: LimaConfig {
@@ -500,9 +549,20 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
     struct VersionFailingRunner {
         calls: RefCell<Vec<(String, Vec<String>)>>,
+        list_calls: RefCell<usize>,
+        base_dir: TempDir,
+    }
+
+    impl Default for VersionFailingRunner {
+        fn default() -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                list_calls: RefCell::new(0),
+                base_dir: tempfile::tempdir().expect("tempdir"),
+            }
+        }
     }
 
     impl CommandRunner for VersionFailingRunner {
@@ -516,6 +576,22 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push((program.to_owned(), args.to_vec()));
+            if program == "limactl" && args == ["list", "--json"] {
+                let mut list_calls = self.list_calls.borrow_mut();
+                let stdout = if *list_calls == 0 {
+                    "[]".to_owned()
+                } else {
+                    format!(
+                        r#"[{{"name":"agbranch-base-macos","status":"Stopped","vmType":"vz","dir":"{}","sshConfigFile":"/tmp/base/ssh.config"}}]"#,
+                        self.base_dir.path().display()
+                    )
+                };
+                *list_calls += 1;
+                return Ok(CommandOutput {
+                    stdout,
+                    stderr: String::new(),
+                });
+            }
             if program == "limactl"
                 && args.first().map(String::as_str) == Some("shell")
                 && args.iter().any(|arg| arg == "codex")
@@ -584,7 +660,7 @@ mod tests {
 
         assert_eq!(
             report.steps,
-            vec!["create", "start", "probe", "stop", "protect"]
+            vec!["create", "start", "probe", "metadata", "stop", "protect"]
         );
         assert_eq!(
             report.agent_cli_versions.get("codex").map(String::as_str),
@@ -603,6 +679,27 @@ mod tests {
                 .iter()
                 .any(|(_, args)| args.first().map(String::as_str) == Some("protect")),
             "prepare report should still protect the base after a failed version probe"
+        );
+        let metadata_path = runner.base_dir.path().join("agbranch-base.json");
+        assert!(
+            metadata_path.exists(),
+            "prepare report should write metadata"
+        );
+        let (metadata, valid) = read_metadata(runner.base_dir.path()).expect("read metadata");
+        assert!(valid, "freshly written metadata should be valid");
+        let metadata = metadata.expect("metadata should exist");
+        assert!(
+            !metadata.prepared_at.contains('.'),
+            "prepared_at should be second-precision RFC3339, got {}",
+            metadata.prepared_at
+        );
+        assert_eq!(
+            fs::read_to_string(metadata_path)
+                .expect("metadata file")
+                .matches("\"prepared_at\"")
+                .count(),
+            1,
+            "metadata file should contain exactly one prepared_at field"
         );
     }
 

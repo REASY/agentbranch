@@ -18,11 +18,12 @@ where
     F: FnOnce() -> Result<T, AppError>,
 {
     let phase_start = Instant::now();
-    let result = f().map_err(|err| {
-        AppError::Validation(ValidationError::StepFailed {
+    let result = f().map_err(|err| match err {
+        AppError::Blocked(_) | AppError::Interrupted => err,
+        other => AppError::Validation(ValidationError::StepFailed {
             step: step_name,
-            detail: err.to_string(),
-        })
+            detail: other.to_string(),
+        }),
     })?;
     eprintln!(
         "{operation} {session}: {step_name} (phase {}s, total {}s)",
@@ -197,6 +198,21 @@ mod tests {
             }
             other => panic!("expected StepFailed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn run_step_preserves_blocked_errors() {
+        let session = SessionName::try_from("demo").expect("session");
+        let total_start = Instant::now();
+        let result: Result<(), AppError> =
+            run_step(&session, "launch", "clone-vm", &total_start, || {
+                Err(AppError::Blocked("base is busy".to_owned()))
+            });
+
+        assert!(matches!(
+            result.expect_err("should fail"),
+            AppError::Blocked(message) if message == "base is busy"
+        ));
     }
 
     fn seed_session(conn: &rusqlite::Connection, session: &SessionName, vm: &VmName) {
