@@ -1,7 +1,11 @@
 use crate::lima::base_info::{
-    BaseMetadata, format_rfc3339_seconds, metadata_path, write_metadata_atomic,
+    BaseMetadata, PROVISION_SOURCE_BAKED_IN, PROVISION_SOURCE_ENV_OVERRIDE, format_rfc3339_seconds,
+    metadata_path, write_metadata_atomic,
 };
-use crate::lima::fingerprint::CURRENT_PROVISION_FINGERPRINT;
+use crate::lima::fingerprint::{
+    CURRENT_PROVISION_FINGERPRINT, ProvisionFingerprintSource,
+    compute_effective_provision_fingerprint,
+};
 use crate::lima::inspect::{LimaInstance, LimaInstanceStatus};
 use crate::platform::detect::HostPlatform;
 use crate::provider::registry::{provider_spec, supported_providers};
@@ -11,7 +15,7 @@ use crate::util::process::CommandRunner;
 use crate::util::time::utc_now;
 use crate::{error::lima::LimaError, error::process::ProcessError, lima::instance};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,14 +63,12 @@ pub fn prepare_steps_for_existing(
     }
 }
 
-pub fn safe_sync_template(platform: HostPlatform) -> PathBuf {
+pub fn safe_sync_template(lima_root: &Path, platform: HostPlatform) -> PathBuf {
     let name = match platform {
         HostPlatform::Macos => "safe-sync-macos.yaml",
         HostPlatform::Linux => "safe-sync-linux.yaml",
     };
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("lima")
-        .join(name)
+    lima_root.join(name)
 }
 
 pub fn prepared_base_vm_name(platform: HostPlatform) -> VmName {
@@ -75,14 +77,16 @@ pub fn prepared_base_vm_name(platform: HostPlatform) -> VmName {
 
 pub fn prepare_base(
     runner: &dyn CommandRunner,
+    lima_root: &Path,
     platform: HostPlatform,
     rebuild: bool,
 ) -> Result<Vec<&'static str>, LimaError> {
-    Ok(prepare_base_report_with_progress(runner, platform, rebuild, |_| {})?.steps)
+    Ok(prepare_base_report_with_progress(runner, lima_root, platform, rebuild, |_| {})?.steps)
 }
 
 pub fn prepare_base_with_progress<F>(
     runner: &dyn CommandRunner,
+    lima_root: &Path,
     platform: HostPlatform,
     rebuild: bool,
     on_step: F,
@@ -92,6 +96,7 @@ where
 {
     prepare_base_with_progress_timeout(
         runner,
+        lima_root,
         platform,
         rebuild,
         Duration::from_secs(20 * 60),
@@ -101,6 +106,7 @@ where
 
 pub fn prepare_base_with_progress_timeout<F>(
     runner: &dyn CommandRunner,
+    lima_root: &Path,
     platform: HostPlatform,
     rebuild: bool,
     start_timeout: Duration,
@@ -110,7 +116,7 @@ where
     F: FnMut(&'static str),
 {
     let base = prepared_base_name(platform);
-    let template = safe_sync_template(platform);
+    let template = safe_sync_template(lima_root, platform);
     let instances = instance::list_instances(runner)?;
     let existing = instances.iter().find(|item| item.name == base.as_str());
     let steps = prepare_steps_for_existing(existing, rebuild);
@@ -132,6 +138,7 @@ where
 
 pub fn prepare_base_report_with_progress<F>(
     runner: &dyn CommandRunner,
+    lima_root: &Path,
     platform: HostPlatform,
     rebuild: bool,
     on_step: F,
@@ -141,6 +148,7 @@ where
 {
     prepare_base_report_with_progress_timeout(
         runner,
+        lima_root,
         platform,
         rebuild,
         Duration::from_secs(20 * 60),
@@ -150,6 +158,7 @@ where
 
 pub fn prepare_base_report_with_progress_timeout<F>(
     runner: &dyn CommandRunner,
+    lima_root: &Path,
     platform: HostPlatform,
     rebuild: bool,
     start_timeout: Duration,
@@ -159,7 +168,7 @@ where
     F: FnMut(&'static str),
 {
     let base = prepared_base_name(platform);
-    let template = safe_sync_template(platform);
+    let template = safe_sync_template(lima_root, platform);
     let instances = instance::list_instances(runner)?;
     let existing = instances.iter().find(|item| item.name == base.as_str());
     let steps = prepare_report_steps_for_existing(existing, rebuild);
@@ -176,7 +185,8 @@ where
                 agent_cli_versions = collect_agent_cli_versions(runner, &base);
             }
             "metadata" => {
-                if let Err(err) = write_base_metadata(runner, &base, &agent_cli_versions) {
+                if let Err(err) = write_base_metadata(runner, lima_root, &base, &agent_cli_versions)
+                {
                     let _ = instance::stop_instance(runner, &base);
                     return Err(err);
                 }
@@ -205,6 +215,7 @@ fn prepare_report_steps_for_existing(
 
 fn write_base_metadata(
     runner: &dyn CommandRunner,
+    lima_root: &Path,
     base: &VmName,
     agent_cli_versions: &BTreeMap<String, String>,
 ) -> Result<(), LimaError> {
@@ -214,10 +225,33 @@ fn write_base_metadata(
         .find(|instance| instance.name == base.as_str())
         .ok_or_else(|| LimaError::MissingPreparedBase(base.as_str().to_owned()))?;
     let instance_dir = PathBuf::from(&instance.instance_dir);
+
+    // Source of the fingerprint matters for lineage-mismatch detection at
+    // inspect time: a base stamped under override must not be considered
+    // fresh by a later default-lineage invocation, and vice versa.
+    let (provision_fingerprint, provision_source) =
+        if std::env::var_os(crate::lima::asset_resolver::LIMA_ASSETS_DIR_ENV).is_some() {
+            let fingerprint =
+                compute_effective_provision_fingerprint(ProvisionFingerprintSource::OverrideTree {
+                    lima_root,
+                })
+                .map_err(|source| LimaError::BaseMetadata {
+                    path: metadata_path(&instance_dir).display().to_string(),
+                    source,
+                })?;
+            (fingerprint, PROVISION_SOURCE_ENV_OVERRIDE.to_owned())
+        } else {
+            (
+                CURRENT_PROVISION_FINGERPRINT.to_owned(),
+                PROVISION_SOURCE_BAKED_IN.to_owned(),
+            )
+        };
+
     let metadata = BaseMetadata {
         schema_version: 1,
         prepared_at: format_rfc3339_seconds(utc_now().as_offset_date_time()),
-        provision_fingerprint: CURRENT_PROVISION_FINGERPRINT.to_owned(),
+        provision_fingerprint,
+        provision_fingerprint_source: Some(provision_source),
         agent_cli_versions: agent_cli_versions.clone(),
     };
     write_metadata_atomic(&instance_dir, &metadata).map_err(|source| LimaError::BaseMetadata {
@@ -612,11 +646,18 @@ mod tests {
     #[test]
     fn prepare_reports_each_step_in_execution_order() {
         let runner = RecordingRunner::default();
+        let lima_root = tempfile::tempdir().expect("lima root");
         let mut seen_steps = Vec::new();
 
-        let executed = prepare_base_with_progress(&runner, HostPlatform::Macos, false, |step| {
-            seen_steps.push(step.to_owned());
-        })
+        let executed = prepare_base_with_progress(
+            &runner,
+            lima_root.path(),
+            HostPlatform::Macos,
+            false,
+            |step| {
+                seen_steps.push(step.to_owned());
+            },
+        )
         .expect("prepare succeeds");
 
         assert_eq!(
@@ -629,9 +670,16 @@ mod tests {
     #[test]
     fn legacy_prepare_path_does_not_probe_provider_versions() {
         let runner = RecordingRunner::default();
+        let lima_root = tempfile::tempdir().expect("lima root");
 
-        let executed = prepare_base_with_progress(&runner, HostPlatform::Macos, false, |_| {})
-            .expect("prepare succeeds");
+        let executed = prepare_base_with_progress(
+            &runner,
+            lima_root.path(),
+            HostPlatform::Macos,
+            false,
+            |_| {},
+        )
+        .expect("prepare succeeds");
 
         assert_eq!(
             executed,
@@ -654,9 +702,16 @@ mod tests {
     #[test]
     fn prepare_report_keeps_cleanup_steps_even_when_version_probe_fails() {
         let runner = VersionFailingRunner::default();
+        let lima_root = tempfile::tempdir().expect("lima root");
 
-        let report = prepare_base_report_with_progress(&runner, HostPlatform::Macos, false, |_| {})
-            .expect("prepare report succeeds");
+        let report = prepare_base_report_with_progress(
+            &runner,
+            lima_root.path(),
+            HostPlatform::Macos,
+            false,
+            |_| {},
+        )
+        .expect("prepare report succeeds");
 
         assert_eq!(
             report.steps,

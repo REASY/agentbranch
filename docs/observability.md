@@ -30,7 +30,16 @@ Layout:
 ├── state.db-shm    # SQLite shared memory
 ├── logs/           # per-session log directories
 ├── staging/        # sync-back bundles + salvage patches
-└── locks/          # per-session locks plus base.lock
+├── assets/         # extracted Lima asset cache, keyed by bundle fingerprint
+└── locks/          # per-session locks plus base.lock and assets.lock
 ```
 
 `agbranch doctor` prints the resolved state root on its last line; `agbranch doctor --json` returns it as `state_root`.
+
+## Environment variables
+
+| Variable                        | Purpose                                                                                     |
+|---------------------------------|---------------------------------------------------------------------------------------------|
+| `AGBRANCH_STATE_ROOT`           | Overrides the state directory verbatim (see above).                                         |
+| `AGBRANCH_PREPARED_BASE_NAME`   | Overrides the Lima VM name for the prepared base. Surfaces as `name_source: env_override`. |
+| `AGBRANCH_LIMA_ASSETS_DIR`      | Points at an alternate `lima/` tree to use instead of the binary's embedded bundle. The directory must contain every in-scope file; typos fail fast with an actionable error. Useful for editing provisioning scripts in place without rebuilding. |

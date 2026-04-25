@@ -58,6 +58,7 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
     let session_name = SessionName::try_from(args.session.as_str())?;
     let provider = args.agent.as_deref().and_then(ProviderKind::parse);
     let host = HostContext::detect()?;
+    let lima_assets = crate::lima::asset_resolver::lima_asset_dir(&host)?;
     std::fs::create_dir_all(&host.state_roots.locks)?;
     let lock_path = host
         .state_roots
@@ -243,6 +244,7 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
                     &lima,
                     &vm_name,
                     &host.home_dir,
+                    &lima_assets.path,
                 )?)
             },
         )?;

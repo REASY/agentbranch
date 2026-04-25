@@ -61,11 +61,13 @@ pub fn render_prepare_json_with_versions(
 pub fn run(args: PrepareArgs) -> Result<(), AppError> {
     let host = HostContext::detect()?;
     let prepared_base = prepared_base_name(host.platform);
+    let lima_assets = crate::lima::asset_resolver::lima_asset_dir(&host)?;
     let started_at = utc_now();
     let start = Instant::now();
     let mut progress = PrepareProgressLogger::new(prepared_base.as_str(), &host.home_dir, start);
     let report = prepare_base_report_with_progress_timeout(
         &RealCommandRunner,
+        &lima_assets.path,
         host.platform,
         args.rebuild,
         args.timeout,

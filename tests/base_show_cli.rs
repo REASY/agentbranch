@@ -18,6 +18,9 @@ fn base_show_json_reports_ready_base() {
             schema_version: 1,
             prepared_at: "2026-04-25T04:24:06Z".to_owned(),
             provision_fingerprint: CURRENT_PROVISION_FINGERPRINT.to_owned(),
+            provision_fingerprint_source: Some(
+                agbranch::lima::base_info::PROVISION_SOURCE_BAKED_IN.to_owned(),
+            ),
             agent_cli_versions: BTreeMap::from([("codex".to_owned(), "0.9.0".to_owned())]),
         })
         .expect("metadata"),

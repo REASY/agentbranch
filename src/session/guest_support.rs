@@ -4,19 +4,15 @@ use crate::session::paths::{provider_shim_path, shellenv_path};
 use crate::types::{GuestPath, ProviderKind, SessionName, VmName};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub fn install_guest_support_files(
     client: &dyn LimaClient,
     vm_name: &VmName,
     host_home_dir: &Path,
+    lima_root: &Path,
 ) -> Result<(), LimaError> {
-    let host_shellenv = crate::types::HostPath::new(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("lima")
-            .join("guest")
-            .join("shellenv.sh"),
-    );
+    let host_shellenv = crate::types::HostPath::new(lima_root.join("guest").join("shellenv.sh"));
     let guest_shellenv = shellenv_path(host_home_dir);
     client.copy_host_file_to_guest(&host_shellenv, vm_name, &guest_shellenv)?;
 
@@ -171,9 +167,15 @@ mod tests {
     fn install_guest_support_files_copies_shellenv_and_provider_shims_under_agbranch_home() {
         let client = RecordingClient::default();
         let vm_name = VmName::new("agbranch-demo");
+        let lima_root = tempfile::tempdir().expect("lima root");
 
-        install_guest_support_files(&client, &vm_name, Path::new("/Users/abalaian"))
-            .expect("guest support install should succeed");
+        install_guest_support_files(
+            &client,
+            &vm_name,
+            Path::new("/Users/abalaian"),
+            lima_root.path(),
+        )
+        .expect("guest support install should succeed");
 
         let copy_targets = client.copy_targets.borrow();
 

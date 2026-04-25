@@ -14,8 +14,20 @@ pub struct BaseMetadata {
     pub schema_version: u16,
     pub prepared_at: String,
     pub provision_fingerprint: String,
+    /// Origin of `provision_fingerprint`: `"baked_in"` for the compile-time
+    /// constant, `"env_override"` for fingerprints recomputed from an
+    /// override tree. Absent for metadata written by older binaries — those
+    /// are treated as `"baked_in"` for backward compatibility. Unknown
+    /// values are treated as invalid metadata, matching the
+    /// `schema_version` policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision_fingerprint_source: Option<String>,
     pub agent_cli_versions: BTreeMap<String, String>,
 }
+
+/// Canonical string values for `BaseMetadata::provision_fingerprint_source`.
+pub const PROVISION_SOURCE_BAKED_IN: &str = "baked_in";
+pub const PROVISION_SOURCE_ENV_OVERRIDE: &str = "env_override";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NameSource {
@@ -38,6 +50,11 @@ pub enum ReadinessIssue {
     MetadataMissing,
     Stale,
     Unprotected,
+    /// `lima_assets` inspect reports that the override path is invalid.
+    LimaAssetsOverrideInvalid,
+    /// `lima_assets` inspect reports `WouldExtract`: cache is absent or
+    /// stale, so the next mutating command must extract before proceeding.
+    LimaAssetsCacheNeedsExtraction,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,8 +71,14 @@ pub struct BaseSummary {
     pub prepared_at: Option<String>,
     pub provision_fingerprint: String,
     pub prepared_provision_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provision_fingerprint_source: Option<String>,
     pub provision_stale: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_reason: Option<String>,
     pub agent_cli_versions: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lima_assets: Option<crate::lima::asset_inspect::LimaAssetInspect>,
 }
 
 pub struct BaseSummaryInput {
@@ -65,14 +88,48 @@ pub struct BaseSummaryInput {
     pub metadata: Option<BaseMetadata>,
     pub metadata_valid: bool,
     pub current_fingerprint: String,
+    /// Which lineage the running binary is resolving assets from. When this
+    /// differs from the metadata's `provision_fingerprint_source`, the base
+    /// was stamped under a different lineage and `stale_reason` becomes
+    /// `lineage_mismatch`.
+    pub current_fingerprint_source: CurrentFingerprintSource,
     pub size_bytes: Option<u64>,
     pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentFingerprintSource {
+    BakedIn,
+    EnvOverride,
+}
+
+impl CurrentFingerprintSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BakedIn => PROVISION_SOURCE_BAKED_IN,
+            Self::EnvOverride => PROVISION_SOURCE_ENV_OVERRIDE,
+        }
+    }
 }
 
 pub fn summarize_expected_base(
     platform: HostPlatform,
     instances: &[LimaInstance],
     current_fingerprint: &str,
+) -> BaseSummary {
+    summarize_expected_base_with_lineage(
+        platform,
+        instances,
+        current_fingerprint,
+        CurrentFingerprintSource::BakedIn,
+    )
+}
+
+pub fn summarize_expected_base_with_lineage(
+    platform: HostPlatform,
+    instances: &[LimaInstance],
+    current_fingerprint: &str,
+    current_fingerprint_source: CurrentFingerprintSource,
 ) -> BaseSummary {
     let override_name = std::env::var("AGBRANCH_PREPARED_BASE_NAME").ok();
     let name_source = if override_name.is_some() {
@@ -101,6 +158,7 @@ pub fn summarize_expected_base(
         metadata,
         metadata_valid,
         current_fingerprint: current_fingerprint.to_owned(),
+        current_fingerprint_source,
         size_bytes,
         created_at,
     });
@@ -209,8 +267,11 @@ impl BaseSummary {
             prepared_at: None,
             provision_fingerprint: current_fingerprint.to_owned(),
             prepared_provision_fingerprint: None,
+            provision_fingerprint_source: None,
             provision_stale: None,
+            stale_reason: None,
             agent_cli_versions: BTreeMap::new(),
+            lima_assets: None,
         }
     }
 
@@ -219,9 +280,23 @@ impl BaseSummary {
             return Self::missing(&input.name, input.name_source, &input.current_fingerprint);
         };
 
-        let metadata = input
+        // Metadata is considered valid only when schema_version == 1 AND
+        // provision_fingerprint_source is absent (older metadata) or one of
+        // the two canonical values. Unknown values are treated like an
+        // unknown schema_version.
+        let metadata_has_known_lineage = input
             .metadata
-            .filter(|metadata| input.metadata_valid && metadata.schema_version == 1);
+            .as_ref()
+            .map(|m| {
+                matches!(
+                    m.provision_fingerprint_source.as_deref(),
+                    None | Some(PROVISION_SOURCE_BAKED_IN) | Some(PROVISION_SOURCE_ENV_OVERRIDE)
+                )
+            })
+            .unwrap_or(true);
+        let metadata = input.metadata.filter(|metadata| {
+            input.metadata_valid && metadata.schema_version == 1 && metadata_has_known_lineage
+        });
         let prepared = metadata.is_some();
         let prepared_at = metadata
             .as_ref()
@@ -229,9 +304,22 @@ impl BaseSummary {
         let prepared_provision_fingerprint = metadata
             .as_ref()
             .map(|metadata| metadata.provision_fingerprint.clone());
+        let metadata_source = metadata.as_ref().map(|m| {
+            m.provision_fingerprint_source
+                .as_deref()
+                .unwrap_or(PROVISION_SOURCE_BAKED_IN)
+                .to_owned()
+        });
         let provision_stale = prepared_provision_fingerprint
             .as_ref()
             .map(|fingerprint| fingerprint != &input.current_fingerprint);
+        let stale_reason = match (provision_stale, metadata_source.as_deref()) {
+            (Some(true), Some(stamped)) if stamped != input.current_fingerprint_source.as_str() => {
+                Some("lineage_mismatch".to_owned())
+            }
+            (Some(true), _) => Some("fingerprint_diverged".to_owned()),
+            _ => None,
+        };
         let agent_cli_versions = metadata
             .as_ref()
             .map(|metadata| metadata.agent_cli_versions.clone())
@@ -250,12 +338,18 @@ impl BaseSummary {
             prepared_at,
             provision_fingerprint: input.current_fingerprint,
             prepared_provision_fingerprint,
+            provision_fingerprint_source: metadata_source,
             provision_stale,
+            stale_reason,
             agent_cli_versions,
+            lima_assets: None,
         }
     }
 
     pub fn readiness_issue(&self) -> Option<ReadinessIssue> {
+        // Base readiness comes first; asset readiness is a secondary gate
+        // below, so scripts that care only about the base keep their
+        // existing priority ordering.
         if self.status == "missing" {
             return Some(ReadinessIssue::Missing);
         }
@@ -268,6 +362,20 @@ impl BaseSummary {
         if !self.protected {
             return Some(ReadinessIssue::Unprotected);
         }
+
+        if let Some(assets) = self.lima_assets.as_ref() {
+            match &assets.state {
+                crate::lima::asset_inspect::LimaAssetInspectState::Cache { .. }
+                | crate::lima::asset_inspect::LimaAssetInspectState::EnvOverride { .. } => {}
+                crate::lima::asset_inspect::LimaAssetInspectState::InvalidOverride { .. } => {
+                    return Some(ReadinessIssue::LimaAssetsOverrideInvalid);
+                }
+                crate::lima::asset_inspect::LimaAssetInspectState::WouldExtract { .. } => {
+                    return Some(ReadinessIssue::LimaAssetsCacheNeedsExtraction);
+                }
+            }
+        }
+
         None
     }
 
@@ -279,6 +387,12 @@ impl BaseSummary {
             }
             Some(ReadinessIssue::Stale) => "base is stale: run agbranch base prepare --rebuild",
             Some(ReadinessIssue::Unprotected) => "base is unprotected: run agbranch base prepare",
+            Some(ReadinessIssue::LimaAssetsOverrideInvalid) => {
+                "lima assets override is invalid: set or fix AGBRANCH_LIMA_ASSETS_DIR (see agbranch base show for details)"
+            }
+            Some(ReadinessIssue::LimaAssetsCacheNeedsExtraction) => {
+                "lima assets cache needs extraction: run any command to extract (or agbranch internal extract-assets)"
+            }
             None => "base is ready",
         }
     }
@@ -335,6 +449,12 @@ impl BaseSummary {
         ];
         if self.provision_stale == Some(true) {
             lines.push("Stale:        yes - run agbranch base prepare --rebuild".to_owned());
+        }
+        if let Some(assets) = self.lima_assets.as_ref() {
+            lines.push(format!(
+                "Assets:       {}",
+                crate::lima::asset_inspect::render_assets_line(assets)
+            ));
         }
         lines.join("\n")
     }
@@ -398,6 +518,7 @@ mod tests {
             schema_version: 1,
             prepared_at: "2026-04-25T04:24:06Z".to_owned(),
             provision_fingerprint: fingerprint.to_owned(),
+            provision_fingerprint_source: Some(PROVISION_SOURCE_BAKED_IN.to_owned()),
             agent_cli_versions: BTreeMap::from([
                 ("claude".to_owned(), "1.2.3".to_owned()),
                 ("codex".to_owned(), "0.9.0".to_owned()),
@@ -427,6 +548,7 @@ mod tests {
             metadata: Some(metadata("sha256:current")),
             metadata_valid: true,
             current_fingerprint: "sha256:current".to_owned(),
+            current_fingerprint_source: CurrentFingerprintSource::BakedIn,
             size_bytes: Some(4_187_593_114),
             created_at: Some("2026-04-25T04:11:27Z".to_owned()),
         });
@@ -452,6 +574,7 @@ mod tests {
             metadata: Some(metadata("sha256:old")),
             metadata_valid: true,
             current_fingerprint: "sha256:current".to_owned(),
+            current_fingerprint_source: CurrentFingerprintSource::BakedIn,
             size_bytes: None,
             created_at: None,
         });
@@ -462,6 +585,7 @@ mod tests {
             metadata: Some(metadata("sha256:current")),
             metadata_valid: true,
             current_fingerprint: "sha256:current".to_owned(),
+            current_fingerprint_source: CurrentFingerprintSource::BakedIn,
             size_bytes: None,
             created_at: None,
         });
@@ -493,6 +617,7 @@ mod tests {
             }),
             metadata_valid: false,
             current_fingerprint: "sha256:current".to_owned(),
+            current_fingerprint_source: CurrentFingerprintSource::BakedIn,
             size_bytes: None,
             created_at: None,
         });
@@ -501,6 +626,201 @@ mod tests {
         assert_eq!(summary.status, "broken");
         assert!(!summary.prepared);
         assert_eq!(summary.provision_stale, None);
+        assert_eq!(
+            summary.readiness_issue(),
+            Some(ReadinessIssue::MetadataMissing)
+        );
+    }
+
+    #[test]
+    fn base_stamped_under_baked_in_reports_lineage_mismatch_when_inspected_under_override() {
+        // Metadata was written under baked-in lineage; current binary is
+        // operating under env_override. Even though the stamped fingerprint
+        // happens to mean "old baked-in value," the current fingerprint is
+        // recomputed from the override tree and the two don't match.
+        let summary = BaseSummary::from_parts(BaseSummaryInput {
+            name: "agbranch-base-macos".to_owned(),
+            name_source: NameSource::Default,
+            instance: Some(instance("Stopped", true)),
+            metadata: Some(BaseMetadata {
+                schema_version: 1,
+                prepared_at: "2026-04-25T04:24:06Z".to_owned(),
+                provision_fingerprint: "sha256:baked-in".to_owned(),
+                provision_fingerprint_source: Some(PROVISION_SOURCE_BAKED_IN.to_owned()),
+                agent_cli_versions: BTreeMap::new(),
+            }),
+            metadata_valid: true,
+            current_fingerprint: "sha256:from-override".to_owned(),
+            current_fingerprint_source: CurrentFingerprintSource::EnvOverride,
+            size_bytes: None,
+            created_at: None,
+        });
+
+        assert_eq!(summary.provision_stale, Some(true));
+        assert_eq!(summary.stale_reason.as_deref(), Some("lineage_mismatch"));
+    }
+
+    #[test]
+    fn base_stamped_under_override_reports_lineage_mismatch_when_inspected_under_default() {
+        let summary = BaseSummary::from_parts(BaseSummaryInput {
+            name: "agbranch-base-macos".to_owned(),
+            name_source: NameSource::Default,
+            instance: Some(instance("Stopped", true)),
+            metadata: Some(BaseMetadata {
+                schema_version: 1,
+                prepared_at: "2026-04-25T04:24:06Z".to_owned(),
+                provision_fingerprint: "sha256:from-override".to_owned(),
+                provision_fingerprint_source: Some(PROVISION_SOURCE_ENV_OVERRIDE.to_owned()),
+                agent_cli_versions: BTreeMap::new(),
+            }),
+            metadata_valid: true,
+            current_fingerprint: "sha256:baked-in".to_owned(),
+            current_fingerprint_source: CurrentFingerprintSource::BakedIn,
+            size_bytes: None,
+            created_at: None,
+        });
+
+        assert_eq!(summary.provision_stale, Some(true));
+        assert_eq!(summary.stale_reason.as_deref(), Some("lineage_mismatch"));
+    }
+
+    #[test]
+    fn stale_with_matching_lineage_reports_fingerprint_diverged_not_lineage_mismatch() {
+        let summary = BaseSummary::from_parts(BaseSummaryInput {
+            name: "agbranch-base-macos".to_owned(),
+            name_source: NameSource::Default,
+            instance: Some(instance("Stopped", true)),
+            metadata: Some(BaseMetadata {
+                schema_version: 1,
+                prepared_at: "2026-04-25T04:24:06Z".to_owned(),
+                provision_fingerprint: "sha256:old".to_owned(),
+                provision_fingerprint_source: Some(PROVISION_SOURCE_BAKED_IN.to_owned()),
+                agent_cli_versions: BTreeMap::new(),
+            }),
+            metadata_valid: true,
+            current_fingerprint: "sha256:new".to_owned(),
+            current_fingerprint_source: CurrentFingerprintSource::BakedIn,
+            size_bytes: None,
+            created_at: None,
+        });
+
+        assert_eq!(summary.provision_stale, Some(true));
+        assert_eq!(
+            summary.stale_reason.as_deref(),
+            Some("fingerprint_diverged")
+        );
+    }
+
+    fn ready_baseline_summary() -> BaseSummary {
+        BaseSummary::from_parts(BaseSummaryInput {
+            name: "agbranch-base-macos".to_owned(),
+            name_source: NameSource::Default,
+            instance: Some(instance("Stopped", true)),
+            metadata: Some(metadata("sha256:current")),
+            metadata_valid: true,
+            current_fingerprint: "sha256:current".to_owned(),
+            current_fingerprint_source: CurrentFingerprintSource::BakedIn,
+            size_bytes: None,
+            created_at: None,
+        })
+    }
+
+    fn lima_assets_cache() -> crate::lima::asset_inspect::LimaAssetInspect {
+        crate::lima::asset_inspect::LimaAssetInspect {
+            state: crate::lima::asset_inspect::LimaAssetInspectState::Cache {
+                path: PathBuf::from("/tmp/lima"),
+                cache_fingerprint: "sha256:bundle".to_owned(),
+            },
+            bundle_fingerprint: "sha256:bundle".to_owned(),
+        }
+    }
+
+    fn lima_assets_would_extract() -> crate::lima::asset_inspect::LimaAssetInspect {
+        crate::lima::asset_inspect::LimaAssetInspect {
+            state: crate::lima::asset_inspect::LimaAssetInspectState::WouldExtract {
+                reason: crate::lima::asset_inspect::CacheWouldExtractReason::Absent,
+            },
+            bundle_fingerprint: "sha256:bundle".to_owned(),
+        }
+    }
+
+    fn lima_assets_invalid_override() -> crate::lima::asset_inspect::LimaAssetInspect {
+        crate::lima::asset_inspect::LimaAssetInspect {
+            state: crate::lima::asset_inspect::LimaAssetInspectState::InvalidOverride {
+                path: PathBuf::from("/tmp/fork"),
+                reasons: vec![crate::lima::asset_inspect::OverrideInvalidReason::NotADirectory],
+            },
+            bundle_fingerprint: "sha256:bundle".to_owned(),
+        }
+    }
+
+    #[test]
+    fn require_ready_passes_when_base_ready_and_assets_cache() {
+        let mut summary = ready_baseline_summary();
+        summary.lima_assets = Some(lima_assets_cache());
+        assert_eq!(summary.readiness_issue(), None);
+    }
+
+    #[test]
+    fn require_ready_fails_when_assets_would_extract_even_if_base_ready() {
+        let mut summary = ready_baseline_summary();
+        summary.lima_assets = Some(lima_assets_would_extract());
+        assert_eq!(
+            summary.readiness_issue(),
+            Some(ReadinessIssue::LimaAssetsCacheNeedsExtraction)
+        );
+        assert_eq!(
+            summary.require_ready_error(),
+            "lima assets cache needs extraction: run any command to extract (or agbranch internal extract-assets)"
+        );
+    }
+
+    #[test]
+    fn require_ready_fails_when_assets_invalid_override_even_if_base_ready() {
+        let mut summary = ready_baseline_summary();
+        summary.lima_assets = Some(lima_assets_invalid_override());
+        assert_eq!(
+            summary.readiness_issue(),
+            Some(ReadinessIssue::LimaAssetsOverrideInvalid)
+        );
+        assert_eq!(
+            summary.require_ready_error(),
+            "lima assets override is invalid: set or fix AGBRANCH_LIMA_ASSETS_DIR (see agbranch base show for details)"
+        );
+    }
+
+    #[test]
+    fn require_ready_base_failures_take_priority_over_asset_failures() {
+        // Base is missing AND cache would extract — base failure must win.
+        let mut summary =
+            BaseSummary::missing("agbranch-base-macos", NameSource::Default, "sha256:current");
+        summary.lima_assets = Some(lima_assets_would_extract());
+        assert_eq!(summary.readiness_issue(), Some(ReadinessIssue::Missing));
+    }
+
+    #[test]
+    fn unknown_provision_fingerprint_source_is_invalid_metadata() {
+        // Metadata carries an unknown lineage value. This must be treated
+        // like an unknown schema_version: prepared = false, no stale reason.
+        let summary = BaseSummary::from_parts(BaseSummaryInput {
+            name: "agbranch-base-macos".to_owned(),
+            name_source: NameSource::Default,
+            instance: Some(instance("Stopped", true)),
+            metadata: Some(BaseMetadata {
+                schema_version: 1,
+                prepared_at: "2026-04-25T04:24:06Z".to_owned(),
+                provision_fingerprint: "sha256:current".to_owned(),
+                provision_fingerprint_source: Some("martian".to_owned()),
+                agent_cli_versions: BTreeMap::new(),
+            }),
+            metadata_valid: true,
+            current_fingerprint: "sha256:current".to_owned(),
+            current_fingerprint_source: CurrentFingerprintSource::BakedIn,
+            size_bytes: None,
+            created_at: None,
+        });
+
+        assert!(!summary.prepared);
         assert_eq!(
             summary.readiness_issue(),
             Some(ReadinessIssue::MetadataMissing)

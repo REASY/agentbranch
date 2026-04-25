@@ -4,7 +4,7 @@ use crate::db::locks::{LockMode, SessionLock, acquire_base_lock};
 use crate::db::models::EventLevel;
 use crate::error::AppError;
 use crate::lima::base;
-use crate::lima::base_info::{BaseSummary, ReadinessIssue, summarize_expected_base};
+use crate::lima::base_info::{BaseSummary, ReadinessIssue};
 use crate::lima::fingerprint::CURRENT_PROVISION_FINGERPRINT;
 use crate::lima::inspect::LimaInstance;
 use crate::lima::instance::list_instances;
@@ -37,7 +37,16 @@ where
     let lock_path = base_lock_path(host);
     let pid = std::process::id();
 
-    match prepare_strategy_for_runner(runner, host.platform)? {
+    // Resolve the Lima asset directory once up front. The inspect below is
+    // read-only and just reads the resolved effective fingerprint + origin
+    // for staleness comparison. Extraction itself happens here too, so any
+    // first-run cache population is accounted for before strategy
+    // evaluation — important because the strategy now uses the runtime
+    // fingerprint when override is active.
+    let lima_assets = crate::lima::asset_resolver::lima_asset_dir(host)?;
+    let lineage = Lineage::from_resolved(&lima_assets);
+
+    match prepare_strategy_for_runner(runner, host.platform, &lineage)? {
         PrepareStrategy::Blocked(message) => Err(AppError::Blocked(message)),
         PrepareStrategy::Ready { notice } => {
             let lock = acquire_base_lock(&lock_path, pid, clone_operation, LockMode::Shared)?;
@@ -49,7 +58,7 @@ where
         PrepareStrategy::Prepare { .. } => {
             let exclusive =
                 acquire_base_lock(&lock_path, pid, prepare_operation, LockMode::Exclusive)?;
-            let decision = prepare_strategy_for_runner(runner, host.platform)?;
+            let decision = prepare_strategy_for_runner(runner, host.platform, &lineage)?;
             match decision {
                 PrepareStrategy::Blocked(message) => Err(AppError::Blocked(message)),
                 PrepareStrategy::Ready { notice } => {
@@ -63,11 +72,38 @@ where
                 }
                 PrepareStrategy::Prepare { rebuild, notice } => {
                     on_notice(notice)?;
-                    let _ = base::prepare_base(runner, host.platform, rebuild)?;
+                    let _ = base::prepare_base(runner, &lima_assets.path, host.platform, rebuild)?;
                     drop(exclusive);
                     acquire_base_lock(&lock_path, pid, clone_operation, LockMode::Shared)
                 }
             }
+        }
+    }
+}
+
+/// Effective provision fingerprint + lineage for the running process.
+/// Cheap to clone and to pass through the strategy evaluator; derives its
+/// values from the resolver's already-resolved `LimaAssetDir`, so the
+/// mutating path and `base show` agree on staleness.
+#[derive(Debug, Clone)]
+pub(crate) struct Lineage {
+    pub(crate) fingerprint: String,
+    pub(crate) source: crate::lima::base_info::CurrentFingerprintSource,
+}
+
+impl Lineage {
+    pub(crate) fn from_resolved(resolved: &crate::lima::asset_resolver::LimaAssetDir) -> Self {
+        let source = match resolved.origin {
+            crate::lima::asset_resolver::LimaAssetOrigin::EnvOverride => {
+                crate::lima::base_info::CurrentFingerprintSource::EnvOverride
+            }
+            crate::lima::asset_resolver::LimaAssetOrigin::StateRootCache { .. } => {
+                crate::lima::base_info::CurrentFingerprintSource::BakedIn
+            }
+        };
+        Self {
+            fingerprint: resolved.effective_provision_fingerprint.clone(),
+            source,
         }
     }
 }
@@ -87,7 +123,32 @@ fn show(args: crate::cli::BaseShowArgs) -> Result<(), AppError> {
     let host = HostContext::detect()?;
     let runner = RealCommandRunner;
     let instances = list_instances(&runner)?;
-    let summary = summarize_expected_base(host.platform, &instances, CURRENT_PROVISION_FINGERPRINT);
+
+    // Inspect first so `base show` stays strictly read-only: `inspect_*`
+    // never writes, whereas calling the mutating resolver would extract on
+    // a cold cache. The inspect result tells us both which tree we'd read
+    // from and which fingerprint lineage to use when assessing staleness.
+    let inspect = crate::lima::asset_inspect::inspect_lima_asset_dir(&host);
+    let (effective_fingerprint, fingerprint_source) = match &inspect.state {
+        crate::lima::asset_inspect::LimaAssetInspectState::EnvOverride {
+            effective_provision_fingerprint,
+            ..
+        } => (
+            effective_provision_fingerprint.clone(),
+            crate::lima::base_info::CurrentFingerprintSource::EnvOverride,
+        ),
+        _ => (
+            CURRENT_PROVISION_FINGERPRINT.to_owned(),
+            crate::lima::base_info::CurrentFingerprintSource::BakedIn,
+        ),
+    };
+    let mut summary = crate::lima::base_info::summarize_expected_base_with_lineage(
+        host.platform,
+        &instances,
+        &effective_fingerprint,
+        fingerprint_source,
+    );
+    summary.lima_assets = Some(inspect);
 
     if args.require_ready
         && let Some(_issue) = summary.readiness_issue()
@@ -138,20 +199,29 @@ pub(crate) fn emit_prepared_base_notice(
 fn prepare_strategy_for_runner(
     runner: &dyn CommandRunner,
     platform: HostPlatform,
+    lineage: &Lineage,
 ) -> Result<PrepareStrategy, AppError> {
     let instances = list_instances(runner)?;
-    Ok(prepare_strategy_for_instances(platform, &instances))
+    Ok(prepare_strategy_for_instances(
+        platform, &instances, lineage,
+    ))
 }
 
 fn prepare_strategy_for_instances(
     platform: HostPlatform,
     instances: &[LimaInstance],
+    lineage: &Lineage,
 ) -> PrepareStrategy {
     let base_name = crate::util::ids::prepared_base_name(platform);
     let instance = instances
         .iter()
         .find(|item| item.name == base_name.as_str());
-    let summary = summarize_expected_base(platform, instances, CURRENT_PROVISION_FINGERPRINT);
+    let summary = crate::lima::base_info::summarize_expected_base_with_lineage(
+        platform,
+        instances,
+        &lineage.fingerprint,
+        lineage.source,
+    );
     prepare_strategy(&summary, instance)
 }
 
@@ -232,6 +302,14 @@ fn prepare_strategy(summary: &BaseSummary, instance: Option<&LimaInstance>) -> P
                 ),
             )),
         },
+        // `prepare_strategy` operates on summaries that never populate
+        // `lima_assets`, so asset-level readiness issues do not reach this
+        // branch in practice. If they ever do, fall through to Ready —
+        // the mutating `lima_asset_dir` call will handle extraction.
+        Some(
+            ReadinessIssue::LimaAssetsOverrideInvalid
+            | ReadinessIssue::LimaAssetsCacheNeedsExtraction,
+        ) => PrepareStrategy::Ready { notice: None },
     }
 }
 
@@ -293,10 +371,14 @@ mod tests {
                 schema_version: 1,
                 prepared_at: "2026-04-25T00:00:00Z".to_owned(),
                 provision_fingerprint: "sha256:current".to_owned(),
+                provision_fingerprint_source: Some(
+                    crate::lima::base_info::PROVISION_SOURCE_BAKED_IN.to_owned(),
+                ),
                 agent_cli_versions: BTreeMap::new(),
             }),
             metadata_valid: true,
             current_fingerprint: "sha256:current".to_owned(),
+            current_fingerprint_source: crate::lima::base_info::CurrentFingerprintSource::BakedIn,
             size_bytes: None,
             created_at: None,
         })
@@ -386,6 +468,76 @@ mod tests {
         );
     }
 
+    /// Regression: the mutating path (`launch`/`open`) must use the
+    /// Lineage-computed fingerprint when evaluating base staleness, not
+    /// the baked-in constant. Under override mode the stamped metadata
+    /// fingerprint is `sha256:override-new`; a mismatch here means the
+    /// strategy evaluator is still consulting `CURRENT_PROVISION_FINGERPRINT`
+    /// and would disagree with `base show`.
+    #[test]
+    fn prepare_strategy_for_instances_uses_lineage_fingerprint_not_baked_in() {
+        use crate::lima::base_info::{
+            BaseMetadata, CurrentFingerprintSource, PROVISION_SOURCE_ENV_OVERRIDE,
+            write_metadata_atomic,
+        };
+
+        let dir = tempdir().expect("tempdir");
+        let base_name = prepared_base_name(HostPlatform::Macos);
+        let instance_dir = dir.path().join(base_name.as_str());
+        fs::create_dir_all(&instance_dir).expect("instance dir");
+        let metadata = BaseMetadata {
+            schema_version: 1,
+            prepared_at: "2026-04-27T00:00:00Z".to_owned(),
+            provision_fingerprint: "sha256:override-new".to_owned(),
+            provision_fingerprint_source: Some(PROVISION_SOURCE_ENV_OVERRIDE.to_owned()),
+            agent_cli_versions: BTreeMap::new(),
+        };
+        write_metadata_atomic(&instance_dir, &metadata).expect("metadata");
+
+        let instance: crate::lima::inspect::LimaInstance =
+            serde_json::from_value(serde_json::json!({
+                "name": base_name.as_str(),
+                "dir": instance_dir.display().to_string(),
+                "sshConfigFile": format!("{}/ssh.config", instance_dir.display()),
+                "vmType": "vz",
+                "status": "Stopped",
+                "protected": true,
+            }))
+            .expect("instance");
+
+        // Lineage carries the exact override fingerprint — staleness must
+        // evaluate to false.
+        let lineage_matching = Lineage {
+            fingerprint: "sha256:override-new".to_owned(),
+            source: CurrentFingerprintSource::EnvOverride,
+        };
+        let decision = prepare_strategy_for_instances(
+            HostPlatform::Macos,
+            std::slice::from_ref(&instance),
+            &lineage_matching,
+        );
+        assert_eq!(decision, PrepareStrategy::Ready { notice: None });
+
+        // Change only the lineage fingerprint (simulating a stale override
+        // tree relative to what was stamped) — strategy should still not
+        // auto-rebuild, but must now warn + clone, per the warn-and-clone
+        // policy. The key invariant is that the decision depends on the
+        // lineage fingerprint, not the baked-in constant.
+        let lineage_stale = Lineage {
+            fingerprint: "sha256:override-newer".to_owned(),
+            source: CurrentFingerprintSource::EnvOverride,
+        };
+        let stale_decision = prepare_strategy_for_instances(
+            HostPlatform::Macos,
+            std::slice::from_ref(&instance),
+            &lineage_stale,
+        );
+        assert!(matches!(
+            stale_decision,
+            PrepareStrategy::Ready { notice: Some(_) }
+        ));
+    }
+
     #[derive(Default)]
     struct FakeRunner {
         list_outputs: RefCell<Vec<String>>,
@@ -456,6 +608,9 @@ mod tests {
                 schema_version: 1,
                 prepared_at: "2026-04-25T04:24:06Z".to_owned(),
                 provision_fingerprint: "sha256:old".to_owned(),
+                provision_fingerprint_source: Some(
+                    crate::lima::base_info::PROVISION_SOURCE_BAKED_IN.to_owned(),
+                ),
                 agent_cli_versions: BTreeMap::new(),
             })
             .expect("metadata json"),
@@ -503,6 +658,9 @@ mod tests {
                 schema_version: 1,
                 prepared_at: "2026-04-25T04:24:06Z".to_owned(),
                 provision_fingerprint: "sha256:current".to_owned(),
+                provision_fingerprint_source: Some(
+                    crate::lima::base_info::PROVISION_SOURCE_BAKED_IN.to_owned(),
+                ),
                 agent_cli_versions: BTreeMap::new(),
             })
             .expect("metadata json"),

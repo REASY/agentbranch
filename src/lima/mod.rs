@@ -1,3 +1,6 @@
+pub mod asset_inspect;
+pub mod asset_resolver;
+pub mod assets;
 pub mod base;
 pub mod base_info;
 pub mod client;

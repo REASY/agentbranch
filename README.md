@@ -91,6 +91,13 @@ There is no crates.io publication, Homebrew tap, or GitHub Release channel yet. 
   - **Linux** — QEMU plus read/write access to `/dev/kvm`
 - For the end-to-end smoke suite only: `jq`, `sqlite3`, `timeout` (or `gtimeout`)
 
+The `lima/` provisioning tree is embedded in the binary at build time and
+extracted on first use, so `cargo install --git` works without the source
+checkout on disk. Set `AGBRANCH_LIMA_ASSETS_DIR=/path/to/lima` to override
+the embedded bundle with an alternate tree — useful for editing
+provisioning scripts in place without rebuilding. See
+[`docs/observability.md`](docs/observability.md) for details.
+
 Run `agbranch doctor` to validate the host before your first `base prepare`.
 
 ---

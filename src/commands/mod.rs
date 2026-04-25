@@ -5,6 +5,7 @@ pub mod close;
 pub mod doctor;
 pub mod export;
 pub mod gc;
+pub mod internal;
 pub mod kill;
 pub mod launch;
 pub mod logs;

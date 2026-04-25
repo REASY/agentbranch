@@ -170,6 +170,13 @@ fn prepared_base_advisory(summary: &BaseSummary) -> Option<&'static str> {
         Some(ReadinessIssue::Unprotected) => {
             Some("prepared base unprotected: run agbranch base prepare")
         }
+        // Doctor's BaseSummary does not populate `lima_assets`, so these
+        // variants aren't reachable through this path. Fall through to no
+        // advisory; asset readiness surfaces through `base show` instead.
+        Some(
+            ReadinessIssue::LimaAssetsOverrideInvalid
+            | ReadinessIssue::LimaAssetsCacheNeedsExtraction,
+        ) => None,
         None => None,
     }
 }
@@ -234,8 +241,11 @@ mod tests {
             prepared_at: None,
             provision_fingerprint: "sha256:current".to_owned(),
             prepared_provision_fingerprint: None,
+            provision_fingerprint_source: None,
             provision_stale: None,
+            stale_reason: None,
             agent_cli_versions: BTreeMap::new(),
+            lima_assets: None,
         };
         let rendered = render_json(
             true,
@@ -274,8 +284,11 @@ mod tests {
             prepared_at: Some("2026-04-25T00:01:00Z".to_owned()),
             provision_fingerprint: "sha256:current".to_owned(),
             prepared_provision_fingerprint: Some("sha256:current".to_owned()),
+            provision_fingerprint_source: None,
             provision_stale: Some(false),
+            stale_reason: None,
             agent_cli_versions: BTreeMap::new(),
+            lima_assets: None,
         };
         let rendered = render_json(
             true,
@@ -311,8 +324,11 @@ mod tests {
             prepared_at: Some("2026-04-25T00:01:00Z".to_owned()),
             provision_fingerprint: "sha256:current".to_owned(),
             prepared_provision_fingerprint: Some("sha256:old".to_owned()),
+            provision_fingerprint_source: None,
             provision_stale: Some(true),
+            stale_reason: Some("fingerprint_diverged".to_owned()),
             agent_cli_versions: BTreeMap::new(),
+            lima_assets: None,
         };
         assert_eq!(
             prepared_base_advisory(&stale),

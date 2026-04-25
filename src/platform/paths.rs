@@ -7,6 +7,7 @@ pub struct StateRoots {
     pub logs: PathBuf,
     pub staging: PathBuf,
     pub locks: PathBuf,
+    pub assets: PathBuf,
     pub db: PathBuf,
 }
 
@@ -16,6 +17,7 @@ impl StateRoots {
             logs: base.join("logs"),
             staging: base.join("staging"),
             locks: base.join("locks"),
+            assets: base.join("assets"),
             db: base.join("state.db"),
             base: base.to_path_buf(),
         }
@@ -38,6 +40,7 @@ impl StateRoots {
             logs: base.join("logs"),
             staging: base.join("staging"),
             locks: base.join("locks"),
+            assets: base.join("assets"),
             db: base.join("state.db"),
             base,
         }

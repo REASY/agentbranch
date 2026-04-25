@@ -161,6 +161,12 @@ pub enum ValidationError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("AGBRANCH_LIMA_ASSETS_DIR points at `{path}`, which is not a directory")]
+    LimaAssetsOverrideNotADirectory { path: PathBuf },
+
+    #[error("AGBRANCH_LIMA_ASSETS_DIR at `{path}` is missing required files: {missing}")]
+    LimaAssetsOverrideIncomplete { path: PathBuf, missing: String },
 }
 
 #[cfg(test)]

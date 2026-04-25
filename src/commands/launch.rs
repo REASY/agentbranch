@@ -66,6 +66,7 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
     let provider = args.agent.as_deref().and_then(ProviderKind::parse);
     let seed = args.seed.as_ref().map(HostPath::new);
     let host = HostContext::detect()?;
+    let lima_assets = crate::lima::asset_resolver::lima_asset_dir(&host)?;
     std::fs::create_dir_all(&host.state_roots.locks)?;
     let lock_path = host
         .state_roots
@@ -130,6 +131,7 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
                     &lima,
                     &vm_name,
                     &host.home_dir,
+                    &lima_assets.path,
                 )?)
             },
         )?;

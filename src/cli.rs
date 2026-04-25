@@ -38,6 +38,30 @@ pub enum Command {
     Watch(WatchArgs),
     Repair(SessionArgs),
     Doctor(JsonFlag),
+    /// Internal / troubleshooting subcommands. Hidden from top-level help
+    /// but visible via `agbranch internal --help`.
+    #[command(hide = true)]
+    Internal(InternalArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct InternalArgs {
+    #[command(subcommand)]
+    pub action: InternalAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum InternalAction {
+    /// Force extraction of the embedded Lima asset bundle into the
+    /// state-root cache. Used by the standalone-binary E2E test and for
+    /// troubleshooting cold-cache state.
+    ExtractAssets(ExtractAssetsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ExtractAssetsArgs {
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
