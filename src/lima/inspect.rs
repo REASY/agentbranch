@@ -61,6 +61,10 @@ impl LimaInstance {
     pub fn has_deprecated_top_level_rosetta(&self) -> bool {
         self.config.rosetta.is_some()
     }
+
+    pub fn is_running(&self) -> bool {
+        self.status == LimaInstanceStatus::Running
+    }
 }
 
 pub fn parse_instances(json: &str) -> Result<Vec<LimaInstance>, LimaError> {

@@ -3,6 +3,7 @@ use crate::error::AppError;
 use crate::lima::base::{
     ProvisionMarkers, prepare_base_report_with_progress_timeout, probe_provision_markers,
 };
+use crate::lima::instance;
 use crate::platform::host::HostContext;
 use crate::types::{Timestamp, VmName};
 use crate::util::ids::prepared_base_name;
@@ -199,10 +200,26 @@ impl StartPhaseWatcher {
                 format_elapsed(started_at.elapsed())
             );
             while !stop_flag.load(Ordering::Relaxed) {
+                let markers = instance::list_instances(&RealCommandRunner)
+                    .ok()
+                    .and_then(|instances| {
+                        instances
+                            .iter()
+                            .find(|i| i.name == prepared_base_vm.as_str())
+                            .cloned()
+                    })
+                    .and_then(|instance| {
+                        if instance.is_running() {
+                            probe_provision_markers(&RealCommandRunner, &prepared_base_vm)
+                        } else {
+                            None
+                        }
+                    });
+
                 if let Ok(contents) = fs::read_to_string(&log_path)
                     && let Some(phase) = infer_prepare_start_phase(
                         prepare_log_since_offset(&contents, log_offset),
-                        probe_provision_markers(&RealCommandRunner, &prepared_base_vm),
+                        markers,
                     )
                     && last_phase != Some(phase)
                 {
