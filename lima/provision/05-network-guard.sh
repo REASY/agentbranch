@@ -22,6 +22,18 @@ while read -r dns_ip; do
   fi
 done < <(resolvectl dns 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | sort -u)
 
+# Lima's hostResolver DNATs guest DNS requests in nat/OUTPUT to a host-side
+# private IP and ephemeral port. Allow those translated destinations
+# explicitly so the private-subnet rejects below do not break name resolution.
+while read -r proto host_dns_ip host_dns_port; do
+  if [ -n "${proto}" ] && [ -n "${host_dns_ip}" ] && [ -n "${host_dns_port}" ]; then
+    iptables -A "${CHAIN}" -p "${proto}" -d "${host_dns_ip}" --dport "${host_dns_port}" -j RETURN
+  fi
+done < <(
+  iptables -t nat -S LIMADNS 2>/dev/null \
+    | sed -nE 's/^-A LIMADNS -d [0-9.]+\/32 -p (udp|tcp).* --to-destination ([0-9.]+):([0-9]+)$/\1 \2 \3/p'
+)
+
 while read -r subnet; do
   if [ -n "${subnet}" ]; then
     iptables -A "${CHAIN}" -d "${subnet}" -j RETURN
