@@ -5,7 +5,7 @@
 //! 1. `AGBRANCH_LIMA_ASSETS_DIR` — if set and the directory is complete,
 //!    use it verbatim and compute a runtime provision fingerprint from
 //!    its contents.
-//! 2. `<state-root>/assets/<bundle-fingerprint>/` — accepted if
+//! 2. `<state-root>/assets/<path-safe-bundle-fingerprint>/` — accepted if
 //!    `fingerprint.ok` matches and the tree passes the complete-tree and
 //!    mtime guards.
 //! 3. Extract the embedded bundle into the state-root cache.
@@ -225,11 +225,11 @@ fn canonical_cache_dir(host: &HostContext) -> PathBuf {
     ))
 }
 
-fn bundle_fingerprint_for_dirname(fingerprint: &str) -> &str {
-    // Fingerprints include a colon (sha256:...), which is valid on the
-    // filesystems we target. Return as-is so the cache directory matches
-    // the stamped value byte-for-byte.
-    fingerprint
+fn bundle_fingerprint_for_dirname(fingerprint: &str) -> String {
+    // `limactl copy --backend=rsync` treats ':' in a host source path as a
+    // remote separator, so keep the cache dirname path-safe while preserving
+    // the canonical fingerprint in fingerprint.ok and metadata.
+    fingerprint.replace(':', "-")
 }
 
 fn assets_lock_path(host: &HostContext) -> PathBuf {
@@ -518,6 +518,32 @@ mod tests {
         assert!(lima_dir.join("safe-sync-macos.yaml").is_file());
         assert!(lima_dir.join("provision/00-system.sh").is_file());
         assert!(lima_dir.join("guest/shellenv.sh").is_file());
+    }
+
+    #[test]
+    fn cache_directory_uses_path_safe_fingerprint_name_but_marker_keeps_canonical_fingerprint() {
+        let _env = EnvTestGuard::noop();
+        let dir = tempdir().expect("tempdir");
+        let host = make_host(dir.path());
+
+        let resolved = lima_asset_dir(&host).expect("resolve");
+        let canonical = resolved.path.parent().expect("canonical");
+        let cache_name = canonical.file_name().expect("cache name").to_string_lossy();
+
+        assert!(
+            !cache_name.contains(':'),
+            "cache directory name should not contain ':' because limactl copy --backend=rsync treats host paths with ':' as remote specs: {cache_name}"
+        );
+        assert!(
+            cache_name.starts_with("sha256-"),
+            "cache directory should preserve the fingerprint algorithm in path-safe form: {cache_name}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(canonical.join("fingerprint.ok"))
+                .expect("fingerprint.ok")
+                .trim_end_matches('\n'),
+            CURRENT_ASSET_BUNDLE_FINGERPRINT
+        );
     }
 
     #[test]
