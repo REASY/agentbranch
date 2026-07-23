@@ -80,7 +80,21 @@ pub fn copy_guest_secret_file(
     instance_name: &VmName,
     guest_secret_file: &GuestPath,
 ) -> Result<(), LimaError> {
-    copy_host_file_to_guest(runner, host_secret_file, instance_name, guest_secret_file)
+    copy_host_file_to_guest(runner, host_secret_file, instance_name, guest_secret_file)?;
+    runner.run(
+        "limactl",
+        &[
+            "shell".to_owned(),
+            instance_name.as_str().to_owned(),
+            "--".to_owned(),
+            "chmod".to_owned(),
+            "600".to_owned(),
+            guest_secret_file.as_path().display().to_string(),
+        ],
+        None,
+        &BTreeMap::new(),
+    )?;
+    Ok(())
 }
 
 pub fn copy_host_file_to_guest(
@@ -221,7 +235,10 @@ fn build_host_copy_args(from: &Path, to: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_host_copy_args, copy_guest_path_to_host, host_rsync_source, seed_repo};
+    use super::{
+        build_host_copy_args, copy_guest_path_to_host, copy_guest_secret_file, host_rsync_source,
+        seed_repo,
+    };
     use crate::error::process::ProcessError;
     use crate::types::{GuestPath, HostPath, VmName};
     use crate::util::process::{CommandOutput, CommandRunner};
@@ -339,6 +356,36 @@ mod tests {
         assert!(
             calls[1].1.iter().any(|arg| arg == "-r"),
             "directory seed copy should remain recursive"
+        );
+    }
+
+    #[test]
+    fn guest_secret_is_chmodded_owner_only_after_copy() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("secret.env");
+        fs::write(&file, "TOKEN=secret\n").expect("secret");
+        let runner = RecordingRunner::default();
+        let vm_name = VmName::new("agbranch-secret");
+        let guest_secret = GuestPath::new("/home/tester.guest/.agbranch/secrets/demo/agent.env");
+
+        copy_guest_secret_file(&runner, &HostPath::new(file), &vm_name, &guest_secret)
+            .expect("copy secret");
+
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), 3, "mkdir, copy, and chmod are required");
+        assert_eq!(
+            calls[2].1,
+            vec![
+                "shell",
+                "agbranch-secret",
+                "--",
+                "chmod",
+                "600",
+                "/home/tester.guest/.agbranch/secrets/demo/agent.env",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
         );
     }
 

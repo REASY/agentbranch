@@ -24,4 +24,23 @@ fn network_guard_allows_dns_to_discovered_uplinks_and_lima_dnat_targets() {
         "network guard should allow Lima hostResolver DNAT targets: {}",
         path.display()
     );
+    assert!(
+        content.contains("iptables -I FORWARD 1") && content.contains("iptables -I DOCKER-USER 1"),
+        "network guard should run before Docker forwarding accepts: {}",
+        path.display()
+    );
+    assert!(
+        content.contains("ip6tables -I OUTPUT 1")
+            && content.contains("ip6tables -I FORWARD 1")
+            && content.contains("fc00::/7")
+            && content.contains("fe80::/10"),
+        "network guard should cover private and link-local IPv6 egress: {}",
+        path.display()
+    );
+    assert!(
+        content.contains("agbranch-network-guard.service")
+            && content.contains("WantedBy=multi-user.target"),
+        "network guard should be reapplied after guest boots: {}",
+        path.display()
+    );
 }

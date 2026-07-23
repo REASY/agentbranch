@@ -38,11 +38,10 @@ fn sha256_of(path: &Path) -> String {
     use sha2::{Digest, Sha256};
     let bytes = std::fs::read(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
     let digest = Sha256::digest(&bytes);
-    let hex = digest
+    digest
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("{:}", hex)
+        .collect::<String>()
 }
 
 fn run_binary(binary: &Path, state_root: &Path, args: &[&str]) -> (String, String, i32) {

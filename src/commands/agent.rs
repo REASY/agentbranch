@@ -22,12 +22,7 @@ use crate::types::{GuestPath, HostPath, ProviderKind, SessionName, VmName};
 use crate::util::process::RealCommandRunner;
 use crate::util::time::utc_now;
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+use std::io::{IsTerminal, Write};
 
 pub(crate) struct SessionOwnedAgentLaunch<'a> {
     pub(crate) session_name: &'a SessionName,
@@ -207,11 +202,11 @@ fn install_provider_bootstrap_files(
         }
         let host_file = write_temp_file("agbranch-provider-bootstrap", &bootstrap.contents)?;
         let copy_result = client.copy_host_file_to_guest(
-            &HostPath::new(host_file.clone()),
+            &HostPath::new(host_file.path()),
             request.vm_name,
             &bootstrap.guest_path,
         );
-        remove_temp_file(&host_file, copy_result)?;
+        close_temp_file(host_file, copy_result)?;
     }
     Ok(())
 }
@@ -244,7 +239,7 @@ fn materialize_auth_imports(
                 host_path,
                 guest_path,
             } => {
-                client.copy_host_file_to_guest(host_path, request.vm_name, guest_path)?;
+                client.copy_guest_secret_file(host_path, request.vm_name, guest_path)?;
                 imported.push(source.as_metadata());
             }
             DetectedAuthSource::EnvVar { name, value } => {
@@ -262,11 +257,11 @@ fn materialize_auth_imports(
         let guest_secret =
             crate::session::paths::agent_auth_env_path(request.host_home, request.session_name);
         let copy_result = client.copy_guest_secret_file(
-            &HostPath::new(host_secret.clone()),
+            &HostPath::new(host_secret.path()),
             request.vm_name,
             &guest_secret,
         );
-        remove_temp_file(&host_secret, copy_result)?;
+        close_temp_file(host_secret, copy_result)?;
         Some(guest_secret)
     };
 
@@ -291,18 +286,18 @@ fn guest_path_exists(
     }
 }
 
-fn write_temp_file(prefix: &str, rendered: &str) -> Result<PathBuf, AppError> {
-    let unique = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("{prefix}-{}-{unique}.tmp", std::process::id()));
-    fs::write(&path, rendered)?;
-    Ok(path)
+fn write_temp_file(prefix: &str, rendered: &str) -> Result<tempfile::NamedTempFile, AppError> {
+    let mut file = tempfile::Builder::new().prefix(prefix).tempfile()?;
+    file.write_all(rendered.as_bytes())?;
+    file.flush()?;
+    Ok(file)
 }
 
-fn remove_temp_file(
-    host_file: &Path,
+fn close_temp_file(
+    host_file: tempfile::NamedTempFile,
     copy_result: Result<(), impl Into<AppError>>,
 ) -> Result<(), AppError> {
-    let cleanup_result = fs::remove_file(host_file);
+    let cleanup_result = host_file.close();
     match (copy_result, cleanup_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(copy_err), Ok(())) => Err(copy_err.into()),

@@ -127,6 +127,33 @@ pub fn update_ref(
     Ok(())
 }
 
+fn compare_and_swap_ref(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    reference: &str,
+    oid: &str,
+    expected_oid: &str,
+) -> Result<bool, crate::error::process::ProcessError> {
+    match runner.run(
+        "git",
+        &[
+            "update-ref".to_owned(),
+            reference.to_owned(),
+            oid.to_owned(),
+            expected_oid.to_owned(),
+        ],
+        Some(repo_root),
+        &BTreeMap::new(),
+    ) {
+        Ok(_) => Ok(true),
+        // `git update-ref` fails when the ref no longer contains the expected
+        // object. Surface that as divergence instead of overwriting a
+        // concurrent update.
+        Err(crate::error::process::ProcessError::Failed { .. }) => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
 pub fn delete_ref_if_exists(
     runner: &dyn CommandRunner,
     repo_root: &Path,
@@ -156,13 +183,14 @@ pub fn fast_forward_review_branch(
 ) -> Result<bool, crate::error::process::ProcessError> {
     let review_ref = format!("refs/heads/{review_branch}");
     if !ref_exists(runner, repo_root, &review_ref)? {
-        update_ref(
+        let source_oid = resolve_ref_oid(runner, repo_root, source_ref)?;
+        return compare_and_swap_ref(
             runner,
             repo_root,
             &review_ref,
-            &resolve_ref_oid(runner, repo_root, source_ref)?,
-        )?;
-        return Ok(true);
+            &source_oid,
+            "0000000000000000000000000000000000000000",
+        );
     }
 
     let review_oid = resolve_ref_oid(runner, repo_root, &review_ref)?;
@@ -171,8 +199,7 @@ pub fn fast_forward_review_branch(
         return Ok(false);
     }
 
-    update_ref(runner, repo_root, &review_ref, &source_oid)?;
-    Ok(true)
+    compare_and_swap_ref(runner, repo_root, &review_ref, &source_oid, &review_oid)
 }
 
 #[cfg(test)]
@@ -278,6 +305,36 @@ mod tests {
                 bundle_path.display().to_string(),
                 format!("HEAD:{incoming_ref}"),
             ]
+        );
+    }
+
+    #[test]
+    fn compare_and_swap_ref_passes_expected_old_oid_to_git() {
+        let runner = RecordingRunner::default();
+        let repo = Path::new("/tmp/repo");
+
+        let updated = compare_and_swap_ref(
+            &runner,
+            repo,
+            "refs/heads/agbranch/demo",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect("update-ref");
+
+        assert!(updated);
+        let calls = runner.calls.borrow();
+        assert_eq!(
+            calls[0].args,
+            vec![
+                "update-ref",
+                "refs/heads/agbranch/demo",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
         );
     }
 }

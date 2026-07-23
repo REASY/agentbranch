@@ -10,9 +10,9 @@ use crate::types::{GuestPath, HostPath, SessionName, VmName};
 use crate::util::process::RealCommandRunner;
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]
 pub struct ResolvedConnection {
@@ -128,12 +128,12 @@ pub fn materialize_guest_secret_with(
     let guest_secret = guest_secret_path(&connection.guest_repo_path, &connection.session_name);
     let copy_result = client
         .copy_guest_secret_file(
-            &HostPath::new(host_secret.clone()),
+            &HostPath::new(host_secret.path()),
             &connection.vm_name,
             &guest_secret,
         )
         .map_err(Into::into);
-    finalize_temp_secret_file(&host_secret, copy_result)?;
+    finalize_temp_secret_file(host_secret, copy_result)?;
     Ok(Some(guest_secret))
 }
 
@@ -162,25 +162,23 @@ pub fn host_alias_from_config(path: &Path) -> Result<String, AppError> {
     Err(AppError::Validation(ValidationError::SshResolutionFailed))
 }
 
-fn temp_secret_file(rendered: &str) -> Result<PathBuf, AppError> {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("agbranch-secret-{unique}.env"));
-    fs::write(&path, rendered)?;
-    Ok(path)
+fn temp_secret_file(rendered: &str) -> Result<tempfile::NamedTempFile, AppError> {
+    let mut file = tempfile::Builder::new()
+        .prefix("agbranch-secret-")
+        .suffix(".env")
+        .tempfile()?;
+    file.write_all(rendered.as_bytes())?;
+    file.flush()?;
+    Ok(file)
 }
 
 fn finalize_temp_secret_file(
-    host_secret: &Path,
+    host_secret: tempfile::NamedTempFile,
     copy_result: Result<(), AppError>,
 ) -> Result<(), AppError> {
-    let cleanup_result = fs::remove_file(host_secret).map_err(|err| {
-        AppError::Validation(ValidationError::TempSecretCleanupFailed {
-            path: host_secret.to_path_buf(),
-            source: err,
-        })
+    let path = host_secret.path().to_path_buf();
+    let cleanup_result = host_secret.close().map_err(|err| {
+        AppError::Validation(ValidationError::TempSecretCleanupFailed { path, source: err })
     });
 
     match (copy_result, cleanup_result) {
@@ -217,6 +215,7 @@ mod tests {
     use crate::util::process::CommandOutput;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
+    use std::io::Write;
     use std::path::{Path, PathBuf};
 
     fn fixture_connection() -> ResolvedConnection {
@@ -373,13 +372,12 @@ mod tests {
 
     #[test]
     fn finalize_temp_secret_file_propagates_copy_error_after_successful_cleanup() {
-        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
         let path = file.path().to_path_buf();
-        drop(file);
-        std::fs::write(&path, "secret").expect("write");
+        file.write_all(b"secret").expect("write");
 
         let result = finalize_temp_secret_file(
-            &path,
+            file,
             Err(AppError::Process(
                 crate::error::process::ProcessError::Failed {
                     program: "limactl".to_owned(),
@@ -395,10 +393,11 @@ mod tests {
 
     #[test]
     fn finalize_temp_secret_file_errors_when_cleanup_fails_after_copy_success() {
-        let missing = PathBuf::from("/tmp/agbranch-secret-missing-for-cleanup.env");
-        let _ = std::fs::remove_file(&missing);
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let missing = file.path().to_path_buf();
+        std::fs::remove_file(&missing).expect("remove behind tempfile");
 
-        let result = finalize_temp_secret_file(&missing, Ok(()));
+        let result = finalize_temp_secret_file(file, Ok(()));
 
         let error = result.expect_err("cleanup should fail");
         assert!(
@@ -406,6 +405,22 @@ mod tests {
                 .to_string()
                 .contains("failed to remove temporary secret file")
         );
+    }
+
+    #[test]
+    fn host_secret_temp_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let file = super::temp_secret_file("API_KEY=secret\n").expect("temp secret");
+        let mode = file
+            .as_file()
+            .metadata()
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

@@ -31,7 +31,10 @@ pub fn validate_close_args(
 }
 
 pub fn should_sync_before_close(sync_state: SyncState) -> bool {
-    !matches!(sync_state, SyncState::Clean | SyncState::Discarded)
+    // The catalog only records the result of the last sync. The guest remains
+    // writable afterwards, so even a `Clean` row may have acquired new commits.
+    // A sync close must therefore probe and bundle every non-discarded guest.
+    sync_state != SyncState::Discarded
 }
 
 pub fn close_mode_error(
@@ -462,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn clean_sync_close_skips_resync_and_records_close_effects() {
+    fn clean_sync_close_performs_final_sync_and_records_close_effects() {
         let dir = tempdir().expect("tempdir");
         let host = host_context(&dir);
         let db = dir.path().join("state.db");
@@ -511,7 +514,7 @@ mod tests {
         )
         .expect("clean close should succeed");
 
-        assert_eq!(sync_calls.get(), 0);
+        assert_eq!(sync_calls.get(), 1);
         assert_eq!(delete_calls.get(), 1);
 
         let session_row = find_session(&conn, &session)
@@ -1022,10 +1025,11 @@ mod tests {
     }
 
     #[test]
-    fn close_sync_skips_resync_for_clean_sessions() {
-        assert!(!should_sync_before_close(SyncState::Clean));
+    fn close_sync_always_performs_a_final_sync() {
+        assert!(should_sync_before_close(SyncState::Clean));
         assert!(should_sync_before_close(SyncState::Pending));
         assert!(should_sync_before_close(SyncState::Blocked));
+        assert!(!should_sync_before_close(SyncState::Discarded));
     }
 
     #[test]

@@ -686,11 +686,13 @@ mod tests {
         )
         .expect_err("running base should block clone");
 
+        let expected_message = format!(
+            "prepared base {base_name} is running: stop it with limactl stop {base_name} or run agbranch base prepare"
+        );
         assert!(matches!(
             err,
             AppError::Blocked(message)
-                if message
-                    == "prepared base agbranch-base-macos is running: stop it with limactl stop agbranch-base-macos or run agbranch base prepare"
+                if message == expected_message
         ));
         assert_eq!(runner.subcommands(), vec!["list"]);
         assert!(notices.into_inner().is_empty());
