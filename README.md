@@ -143,6 +143,7 @@ Use when you want a throwaway VM with some seed files and no expectation of merg
 - `--seed <host-path>` copies a filtered host directory into `~/sandbox/<session>` in the guest. Built-in build/cache exclusions apply, and an optional `.agbranchignore` uses gitignore syntax for project-specific exclusions. Symlinks that resolve outside the seed root are rejected.
 - `--agent {codex|claude|gemini}` bootstraps the provider inside the VM and attaches to its tmux window.
 - `--auth {import|none|ask}` controls whether detected host credentials enter the guest.
+- `--publish 3000` publishes guest TCP port 3000 on `127.0.0.1:3000`; `--publish 8080:3000` chooses a different host port.
 - `export --from ~/sandbox/<session> --to <host-path>` pulls artifacts out before you close.
 - `close --discard --yes` destroys the VM. Sandbox sessions **cannot** close with `--sync` — that's enforced, not advisory.
 
@@ -177,6 +178,17 @@ Use `--auth import` to import detected credentials without a prompt, `--auth non
 Session-owned providers run inside the VM with permissive defaults. The VM boundary protects the host, not any credentials imported into the guest.
 
 The readiness probe for the prepared base verifies `codex --version`, `claude --version`, `gemini --version`, Node `>= 20`, `tmux`, and `docker compose version` — so if `base prepare` completes, the runtime prerequisites for the supported agent CLIs are in place.
+
+## Guest services
+
+Publish ports when creating a session, then inspect their live state:
+
+```bash
+agbranch launch --session web --seed . --publish 3000 --publish 8080:80
+agbranch ports web
+```
+
+Published services bind only to host localhost. Add `/udp` for UDP mappings, for example `--publish 5353/udp`. `agbranch ports` reports the host endpoint and whether the corresponding guest port is currently listening.
 
 ---
 

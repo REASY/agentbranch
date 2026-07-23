@@ -9,6 +9,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!(
             "../../migrations/0002_provider_preferences.sql"
         )),
+        M::up(include_str!("../../migrations/0003_session_ports.sql")),
     ])
 });
 
@@ -32,7 +33,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .expect("read user_version");
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
 
         let has_sessions: bool = conn
             .query_row(
@@ -56,7 +57,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .expect("read user_version");
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]
@@ -124,7 +125,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         let sessions_exists: bool = conn
             .query_row(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions'",
@@ -142,5 +143,23 @@ mod tests {
             .unwrap_or(false);
         assert!(sessions_exists);
         assert!(preferences_exists);
+    }
+
+    #[test]
+    fn new_schema_has_session_ports() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("state.db");
+        let mut conn = Connection::open(&path).expect("open");
+        run(&mut conn).expect("migrate");
+
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'session_ports'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        assert!(exists);
     }
 }

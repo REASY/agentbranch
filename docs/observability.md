@@ -10,6 +10,7 @@ Everything a session does is observable from outside the VM.
 - **`doctor --json`** — `{ ok, platform, lima_version, state_root, prepared_base, ... }` for health checks.
 - **`repair`** — reads the session's lifecycle state and picks a deterministic recovery action (no-op, restart, finish-destroy); returns `Blocked` when manual intervention is required.
 - **Launch timings** — `launch` and `open` expose ordered phase durations, total wall time, and the slowest phase in human and JSON output.
+- **`ports --json`** — published localhost-to-guest mappings plus live listener state when the VM is running.
 
 ## State directory
 
@@ -26,7 +27,7 @@ Layout:
 
 ```
 <state-root>/
-├── state.db        # SQLite catalog (sessions, events, sync runs, provider preferences)
+├── state.db        # SQLite catalog (sessions, ports, events, sync runs, preferences)
 ├── state.db-wal    # SQLite WAL journal
 ├── state.db-shm    # SQLite shared memory
 ├── logs/           # per-session log directories

@@ -1,5 +1,6 @@
 use crate::error::lima::LimaError;
 use crate::lima::{copy, inspect::LimaInstance, instance};
+use crate::ports::PublishedPort;
 use crate::types::{DiskSize, GuestPath, HostPath, MemorySize, VmName};
 use crate::util::process::{CommandOutput, CommandRunner};
 use std::collections::BTreeMap;
@@ -17,6 +18,14 @@ pub trait LimaClient {
     ) -> Result<(), LimaError>;
 
     fn start_instance(&self, name: &VmName) -> Result<(), LimaError>;
+
+    fn configure_port_forwards(
+        &self,
+        _name: &VmName,
+        _ports: &[PublishedPort],
+    ) -> Result<(), LimaError> {
+        Ok(())
+    }
 
     fn stop_instance(&self, name: &VmName) -> Result<(), LimaError>;
 
@@ -81,6 +90,14 @@ impl<R: CommandRunner> LimaClient for LimactlClient<'_, R> {
 
     fn start_instance(&self, name: &VmName) -> Result<(), LimaError> {
         instance::start_instance(self.runner, name)
+    }
+
+    fn configure_port_forwards(
+        &self,
+        name: &VmName,
+        ports: &[PublishedPort],
+    ) -> Result<(), LimaError> {
+        instance::configure_port_forwards(self.runner, name, ports)
     }
 
     fn stop_instance(&self, name: &VmName) -> Result<(), LimaError> {

@@ -1,4 +1,5 @@
 use crate::error::ValidationError;
+use crate::ports::PublishedPort;
 use crate::types::{DiskSize, MemorySize};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -26,6 +27,7 @@ pub enum Command {
     Kill(KillArgs),
     Ps(ListArgs),
     Show(SessionArgs),
+    Ports(PortsArgs),
     Start(SessionArgs),
     Stop(SessionArgs),
     Shell(ShellArgs),
@@ -106,6 +108,10 @@ pub struct LaunchArgs {
     /// prompting once when no choice exists.
     #[arg(long, value_enum, requires = "agent")]
     pub auth: Option<AuthMode>,
+    /// Publish a guest port on host localhost. Accepts GUEST_PORT or
+    /// HOST_PORT:GUEST_PORT, with an optional /tcp or /udp suffix.
+    #[arg(long = "publish", value_name = "PORT")]
+    pub publish: Vec<PublishedPort>,
     #[arg(long)]
     pub cpus: Option<u16>,
     #[arg(long)]
@@ -130,6 +136,10 @@ pub struct OpenArgs {
     /// prompting once when no choice exists.
     #[arg(long, value_enum, requires = "agent")]
     pub auth: Option<AuthMode>,
+    /// Publish a guest port on host localhost. Accepts GUEST_PORT or
+    /// HOST_PORT:GUEST_PORT, with an optional /tcp or /udp suffix.
+    #[arg(long = "publish", value_name = "PORT")]
+    pub publish: Vec<PublishedPort>,
     #[arg(long)]
     pub cpus: Option<u16>,
     #[arg(long)]
@@ -264,6 +274,14 @@ impl SessionSelector {
 
 #[derive(Debug, Args)]
 pub struct SessionArgs {
+    #[command(flatten)]
+    pub session: SessionSelector,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct PortsArgs {
     #[command(flatten)]
     pub session: SessionSelector,
     #[arg(long)]
@@ -476,6 +494,51 @@ mod tests {
                 .expect_err("auth without an agent should be rejected");
 
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn launch_and_open_accept_repeatable_port_publications() {
+        let cli = Cli::parse_from([
+            "agbranch",
+            "launch",
+            "--session",
+            "demo",
+            "--publish",
+            "3000",
+            "--publish",
+            "8080:80/udp",
+        ]);
+        let Command::Launch(args) = cli.command else {
+            panic!("expected launch");
+        };
+        assert_eq!(args.publish.len(), 2);
+        assert_eq!(args.publish[0].host_port, 3000);
+        assert_eq!(args.publish[1].guest_port, 80);
+
+        let cli = Cli::parse_from([
+            "agbranch",
+            "open",
+            "--session",
+            "demo",
+            "--repo",
+            ".",
+            "--publish",
+            "5173",
+        ]);
+        let Command::Open(args) = cli.command else {
+            panic!("expected open");
+        };
+        assert_eq!(args.publish[0].host_port, 5173);
+    }
+
+    #[test]
+    fn ports_accepts_positional_session_and_json() {
+        let cli = Cli::parse_from(["agbranch", "ports", "demo", "--json"]);
+        let Command::Ports(args) = cli.command else {
+            panic!("expected ports");
+        };
+        assert_eq!(args.session.resolve().expect("session"), "demo");
+        assert!(args.json);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use crate::error::lima::LimaError;
 use crate::lima::inspect::{LimaInstance, parse_instances};
+use crate::ports::PublishedPort;
 use crate::types::{DiskSize, MemorySize, VmName};
 use crate::util::process::{CommandOutput, CommandRunner};
 use std::collections::BTreeMap;
@@ -39,6 +40,39 @@ pub fn build_create_args(name: &VmName, template: &Path) -> Vec<String> {
 
 pub fn start_instance(runner: &dyn CommandRunner, name: &VmName) -> Result<(), LimaError> {
     start_instance_with_timeout(runner, name, None)
+}
+
+pub fn configure_port_forwards(
+    runner: &dyn CommandRunner,
+    name: &VmName,
+    ports: &[PublishedPort],
+) -> Result<(), LimaError> {
+    if ports.is_empty() {
+        return Ok(());
+    }
+    run_simple(runner, &build_configure_port_forwards_args(name, ports))
+}
+
+pub fn build_configure_port_forwards_args(name: &VmName, ports: &[PublishedPort]) -> Vec<String> {
+    let explicit = ports
+        .iter()
+        .map(|port| {
+            format!(
+                r#"{{"guestIP":"0.0.0.0","guestPort":{},"hostIP":"127.0.0.1","hostPort":{},"proto":"{}"}}"#,
+                port.guest_port,
+                port.host_port,
+                port.protocol.as_str(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    vec![
+        "edit".to_owned(),
+        "--tty=false".to_owned(),
+        "--set".to_owned(),
+        format!(".portForwards = [{explicit}] + .portForwards"),
+        name.as_str().to_owned(),
+    ]
 }
 
 pub fn start_instance_with_timeout(
@@ -258,6 +292,26 @@ mod tests {
         assert_eq!(
             args,
             vec!["start", "--timeout", "20m", "agbranch-base-macos"]
+        );
+    }
+
+    #[test]
+    fn port_forward_edit_prepends_localhost_only_rules() {
+        let name = VmName::new("agbranch-demo");
+        let ports = vec![
+            "8080:3000".parse().expect("tcp"),
+            "5353/udp".parse().expect("udp"),
+        ];
+
+        assert_eq!(
+            build_configure_port_forwards_args(&name, &ports),
+            vec![
+                "edit",
+                "--tty=false",
+                "--set",
+                r#".portForwards = [{"guestIP":"0.0.0.0","guestPort":3000,"hostIP":"127.0.0.1","hostPort":8080,"proto":"tcp"},{"guestIP":"0.0.0.0","guestPort":5353,"hostIP":"127.0.0.1","hostPort":5353,"proto":"udp"}] + .portForwards"#,
+                "agbranch-demo",
+            ]
         );
     }
 

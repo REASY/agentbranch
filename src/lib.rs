@@ -8,6 +8,7 @@ pub mod git;
 pub mod lima;
 pub mod platform;
 pub mod policy;
+pub mod ports;
 pub mod provider;
 pub mod session;
 pub mod sync;

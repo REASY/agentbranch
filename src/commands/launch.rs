@@ -8,6 +8,7 @@ use crate::commands::session_slot::ensure_runtime_session_slot_available;
 use crate::db::connect::open_catalog;
 use crate::db::locks::SessionLock;
 use crate::db::models::{AgentLaunchPreset, LifecycleState, SessionMode};
+use crate::db::ports::insert_session_ports;
 use crate::db::sessions::{
     InsertSession, insert_session, update_agent_metadata, update_lifecycle_state_with_timestamps,
 };
@@ -15,6 +16,7 @@ use crate::error::{AppError, ValidationError};
 use crate::lima::client::{LimaClient, LimactlClient};
 use crate::platform::host::HostContext;
 use crate::policy::artifacts::{ArtifactPolicy, FilteredSeedTree};
+use crate::ports::{PublishedPort, validate_published_ports};
 use crate::session::guest_support;
 use crate::session::orchestration::{
     LockMetadataGuard, OperationTimings, SessionGuard, TimingSummary, run_step,
@@ -36,6 +38,7 @@ pub fn render_launch_json(
     session: &SessionName,
     vm_name: &crate::types::VmName,
     workspace: &GuestPath,
+    published_ports: &[PublishedPort],
     timings: &TimingSummary,
 ) -> Result<String, serde_json::Error> {
     serde_json::to_string(&serde_json::json!({
@@ -43,6 +46,7 @@ pub fn render_launch_json(
         "vm_name": vm_name,
         "lifecycle_state": "running",
         "guest_workspace_path": workspace,
+        "published_ports": published_ports,
         "timings": timings,
     }))
 }
@@ -82,6 +86,7 @@ pub fn build_launch_record(
 pub fn run(args: LaunchArgs) -> Result<(), AppError> {
     let session_name = SessionName::try_from(args.session.as_str())?;
     let provider = args.agent.as_deref().and_then(ProviderKind::parse);
+    validate_published_ports(&args.publish).map_err(ValidationError::InvalidPublishedPorts)?;
     let seed = args.seed.as_ref().map(HostPath::new);
     let host = HostContext::detect()?;
     let lima_assets = crate::lima::asset_resolver::lima_asset_dir(&host)?;
@@ -95,7 +100,7 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
     let runner = RealCommandRunner;
     let lima = LimactlClient::new(&runner);
     let timings = OperationTimings::start();
-    let catalog = open_catalog(&host.state_roots.db)?;
+    let mut catalog = open_catalog(&host.state_roots.db)?;
     let vm_name = session_vm_name(&session_name);
     let workspace = guest_sandbox_workspace(&host.home_dir, &session_name);
     let now = utc_now();
@@ -123,7 +128,14 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
         })
         .transpose()?;
 
-    insert_session(&catalog, &record)?;
+    {
+        let tx = catalog
+            .transaction()
+            .map_err(crate::error::db::DbError::from)?;
+        insert_session(&tx, &record)?;
+        insert_session_ports(&tx, &session_name, &args.publish)?;
+        tx.commit().map_err(crate::error::db::DbError::from)?;
+    }
     let lock_guard =
         LockMetadataGuard::acquire(&catalog, &session_name, std::process::id(), "launch")?;
 
@@ -151,6 +163,11 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
             )?)
         })?;
         drop(base_clone_lock);
+        if !args.publish.is_empty() {
+            run_step(&session_name, "launch", "configure-ports", &timings, || {
+                Ok(lima.configure_port_forwards(&vm_name, &args.publish)?)
+            })?;
+        }
         run_step(&session_name, "launch", "start-vm", &timings, || {
             Ok(lima.start_instance(&vm_name)?)
         })?;
@@ -246,12 +263,17 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
     if args.json {
         println!(
             "{}",
-            render_launch_json(&session_name, &vm_name, &workspace, &timing_summary).map_err(
-                |err| AppError::Validation(ValidationError::StepFailed {
-                    step: "finalize",
-                    detail: format!("failed to serialize json output: {err}"),
-                })
-            )?
+            render_launch_json(
+                &session_name,
+                &vm_name,
+                &workspace,
+                &args.publish,
+                &timing_summary,
+            )
+            .map_err(|err| AppError::Validation(ValidationError::StepFailed {
+                step: "finalize",
+                detail: format!("failed to serialize json output: {err}"),
+            }))?
         );
     } else {
         eprintln!("{}", timing_summary.render_human("launch", &session_name));
@@ -331,11 +353,15 @@ mod tests {
             }),
         };
 
-        let rendered = render_launch_json(&session, &vm_name, &workspace, &timings).expect("json");
+        let published_ports = vec!["8080:3000".parse().expect("port")];
+        let rendered =
+            render_launch_json(&session, &vm_name, &workspace, &published_ports, &timings)
+                .expect("json");
         let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid json");
         assert_eq!(value["session"], "research");
         assert_eq!(value["timings"]["total_ms"], 14_250);
         assert_eq!(value["timings"]["phases"][0]["duration_ms"], 12_000);
         assert_eq!(value["timings"]["slowest_phase"]["name"], "start-vm");
+        assert_eq!(value["published_ports"][0]["host_port"], 8080);
     }
 }

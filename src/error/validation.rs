@@ -117,6 +117,9 @@ pub enum ValidationError {
     #[error("unsupported provider")]
     UnsupportedProvider,
 
+    #[error("invalid published ports: {0}")]
+    InvalidPublishedPorts(String),
+
     #[error("--auth ask requires an interactive terminal; use `--auth import` or `--auth none`")]
     AuthAskRequiresTerminal,
 

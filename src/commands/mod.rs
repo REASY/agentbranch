@@ -10,6 +10,7 @@ pub mod kill;
 pub mod launch;
 pub mod logs;
 pub mod open;
+pub mod ports;
 pub mod prepare;
 pub mod ps;
 pub mod repair;

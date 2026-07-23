@@ -8,6 +8,7 @@ use crate::commands::session_slot::ensure_runtime_session_slot_available;
 use crate::db::connect::open_catalog;
 use crate::db::locks::SessionLock;
 use crate::db::models::{AgentLaunchPreset, RepoSyncMode, SessionMode};
+use crate::db::ports::insert_session_ports;
 use crate::db::sessions::{
     InsertSession, insert_session, update_agent_metadata, update_lifecycle_state_with_timestamps,
 };
@@ -21,6 +22,7 @@ use crate::git::session_refs::{
 use crate::lima::client::{LimaClient, LimactlClient};
 use crate::lima::shell;
 use crate::platform::host::HostContext;
+use crate::ports::{PublishedPort, validate_published_ports};
 use crate::session::guest_support;
 use crate::session::orchestration::{
     LockMetadataGuard, OperationTimings, SessionGuard, TimingSummary, run_step,
@@ -43,6 +45,7 @@ pub fn render_open_json(
     lifecycle_state: crate::db::models::LifecycleState,
     repo_host_path: &HostPath,
     repo_guest_path: &GuestPath,
+    published_ports: &[PublishedPort],
     timings: &TimingSummary,
 ) -> Result<String, serde_json::Error> {
     serde_json::to_string(&serde_json::json!({
@@ -51,6 +54,7 @@ pub fn render_open_json(
         "lifecycle_state": crate::db::models::lifecycle_state_name(lifecycle_state),
         "repo_host_path": repo_host_path,
         "repo_guest_path": repo_guest_path,
+        "published_ports": published_ports,
         "timings": timings,
     }))
 }
@@ -62,6 +66,7 @@ fn render_open_repo_progress(session: &SessionName, repo_root: &Path, detail: &s
 pub fn run(args: OpenArgs) -> Result<(), AppError> {
     let session_name = SessionName::try_from(args.session.as_str())?;
     let provider = args.agent.as_deref().and_then(ProviderKind::parse);
+    validate_published_ports(&args.publish).map_err(ValidationError::InvalidPublishedPorts)?;
     let host = HostContext::detect()?;
     let lima_assets = crate::lima::asset_resolver::lima_asset_dir(&host)?;
     std::fs::create_dir_all(&host.state_roots.locks)?;
@@ -116,7 +121,7 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
 
     let head_oid_at_open = Some(base_oid.clone());
     let head_ref_at_open = Some(resolved_base_ref.clone());
-    let catalog = open_catalog(&host.state_roots.db)?;
+    let mut catalog = open_catalog(&host.state_roots.db)?;
     let now = utc_now();
     let vm_name = session_vm_name(&session_name);
     let guest_repo = guest_repo_path(&host.home_dir, &session_name);
@@ -145,33 +150,40 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
         })
         .transpose()?;
 
-    insert_session(
-        &catalog,
-        &InsertSession {
-            name: session_name.clone(),
-            vm_name: vm_name.clone(),
-            session_mode: SessionMode::Repo,
-            repo_sync_mode: Some(RepoSyncMode::GitNative),
-            host_context_path: Some(host_repo.clone()),
-            guest_workspace_path: guest_repo.clone(),
-            seed_host_path: None,
-            host_git_root: Some(git_root.clone()),
-            host_head_oid_at_open: head_oid_at_open,
-            host_head_ref_at_open: head_ref_at_open,
-            host_dirty_at_open: baseline.dirty,
-            base_ref: Some(resolved_base_ref.clone()),
-            review_branch: Some(review_branch.clone()),
-            session_ref_base: Some(hidden_refs.base.clone()),
-            session_ref_head: Some(hidden_refs.head.clone()),
-            provider_kind: provider,
-            imported_provider_files_json: "[]".to_owned(),
-            guest_tmux_socket_path: Some(guest_tmux_socket.clone()),
-            shell_window_name: Some("shell".to_owned()),
-            agent_window_name: Some("agent".to_owned()),
-            agent_launch_preset: provider.map(|_| AgentLaunchPreset::Unrestricted),
-            created_at: now,
-        },
-    )?;
+    {
+        let tx = catalog
+            .transaction()
+            .map_err(crate::error::db::DbError::from)?;
+        insert_session(
+            &tx,
+            &InsertSession {
+                name: session_name.clone(),
+                vm_name: vm_name.clone(),
+                session_mode: SessionMode::Repo,
+                repo_sync_mode: Some(RepoSyncMode::GitNative),
+                host_context_path: Some(host_repo.clone()),
+                guest_workspace_path: guest_repo.clone(),
+                seed_host_path: None,
+                host_git_root: Some(git_root.clone()),
+                host_head_oid_at_open: head_oid_at_open,
+                host_head_ref_at_open: head_ref_at_open,
+                host_dirty_at_open: baseline.dirty,
+                base_ref: Some(resolved_base_ref.clone()),
+                review_branch: Some(review_branch.clone()),
+                session_ref_base: Some(hidden_refs.base.clone()),
+                session_ref_head: Some(hidden_refs.head.clone()),
+                provider_kind: provider,
+                imported_provider_files_json: "[]".to_owned(),
+                guest_tmux_socket_path: Some(guest_tmux_socket.clone()),
+                shell_window_name: Some("shell".to_owned()),
+                agent_window_name: Some("agent".to_owned()),
+                agent_launch_preset: provider.map(|_| AgentLaunchPreset::Unrestricted),
+                created_at: now,
+            },
+        )?;
+        insert_session_ports(&tx, &session_name, &args.publish)?;
+        tx.commit().map_err(crate::error::db::DbError::from)?;
+    }
     let lock_guard =
         LockMetadataGuard::acquire(&catalog, &session_name, std::process::id(), "open")?;
     eprintln!(
@@ -250,6 +262,11 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
             )?)
         })?;
         drop(base_clone_lock);
+        if !args.publish.is_empty() {
+            run_step(&session_name, "open", "configure-ports", &timings, || {
+                Ok(lima.configure_port_forwards(&vm_name, &args.publish)?)
+            })?;
+        }
         run_step(&session_name, "open", "start-vm", &timings, || {
             Ok(lima.start_instance(&vm_name)?)
         })?;
@@ -349,6 +366,7 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
                 transition_after_open(),
                 &host_repo,
                 &guest_repo,
+                &args.publish,
                 &timing_summary,
             )
             .map_err(|err| AppError::Validation(ValidationError::StepFailed {
@@ -586,6 +604,7 @@ mod tests {
             &GuestPath::new(PathBuf::from(
                 "/home/agbranch.guest/workspaces/agbranch-smoke-happy/repo",
             )),
+            &["8080:3000".parse().expect("port")],
             &TimingSummary {
                 total_ms: 14_250,
                 phases: vec![PhaseTiming {
@@ -606,5 +625,6 @@ mod tests {
         assert_eq!(value["lifecycle_state"], "running");
         assert_eq!(value["timings"]["total_ms"], 14_250);
         assert_eq!(value["timings"]["slowest_phase"]["name"], "start-vm");
+        assert_eq!(value["published_ports"][0]["guest_port"], 3000);
     }
 }
