@@ -6,6 +6,7 @@ Every `agbranch` subcommand, grouped by what you're trying to do. For full flag 
 |---------------|--------------------------|----------------------------------------------------------------------------------------------|
 | **Setup**     | `base prepare`           | Build or refresh the prepared base VM for your host (`--rebuild`, `--timeout`, `--json`).   |
 |               | `doctor`                 | Validate host: `limactl` version, platform prerequisites, orphaned VMs.                      |
+|               | `completions`             | Generate Bash, Zsh, Fish, Elvish, or PowerShell completion scripts.                          |
 | **Create**    | `launch`                 | Start a sandbox session, optionally `--seed`, `--agent`, and `--auth`.                       |
 |               | `open`                   | Start a git-native repo session, optionally `--base`, `--agent`, and `--auth`.               |
 |               | `retry`                  | Resume a post-clone launch failure from its last completed phase.                            |
@@ -31,6 +32,8 @@ Every `agbranch` subcommand, grouped by what you're trying to do. For full flag 
 |               | `gc`                     | Reclaim staging dirs, log dirs, and obsolete base VMs.                                       |
 
 Commands print human output by default. `--json` enables machine-readable output where supported; streaming commands may emit line-delimited JSON instead of a single document. Most session-scoped commands accept either the `SESSION` positional or `--session <name>`; `launch` and `open` require `--session`, and `watch` uses `--session` only.
+
+`agbranch completions SHELL` writes a completion script to stdout. Supported values are `bash`, `zsh`, `fish`, `elvish`, and `powershell`; run `agbranch completions --help` for common installation paths.
 
 For `launch --agent`, `open --agent`, and `agent start`, `--auth import` imports detected host credentials without prompting, `--auth none` skips imports, and `--auth ask` forces an interactive prompt when credentials are detected. The resulting import/none decision is remembered per provider in the state catalog. With no flag, the remembered choice is reused; if none exists, interactive commands prompt once and non-interactive commands import nothing.
 

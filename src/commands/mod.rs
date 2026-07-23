@@ -3,6 +3,7 @@ pub mod attach;
 pub mod auth;
 pub mod base;
 pub mod close;
+pub mod completions;
 pub mod doctor;
 pub mod export;
 pub mod gc;

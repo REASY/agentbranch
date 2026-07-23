@@ -131,6 +131,13 @@ Every mutating command supports `--json` for scripting. Most session-scoped comm
 
 If a launch fails after cloning its VM, agbranch preserves the session and records the last completed phase. Fix the reported cause and run `agbranch retry <session>` to continue without cloning and booting a fresh VM. Failures before cloning completes still roll back automatically.
 
+Generate completion scripts directly from the current CLI definition:
+
+```sh
+agbranch completions bash       # also: zsh, fish, elvish, powershell
+agbranch completions zsh > ~/.zfunc/_agbranch
+```
+
 ---
 
 ## The two workflows

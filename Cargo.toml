@@ -10,6 +10,7 @@ version = "0.1.1"
 [dependencies]
 byte-unit = { version = "5.2", features = ["serde"] }
 clap = { version = "4.6", features = ["derive"] }
+clap_complete = "4.6"
 comfy-table = "7.2"
 ctrlc = "3"
 fs2 = "0.4"

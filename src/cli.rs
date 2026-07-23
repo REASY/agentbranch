@@ -9,7 +9,14 @@ use std::time::Duration;
 #[command(
     name = "agbranch",
     version,
-    about = "Disposable coding sessions for AI agents, synced back through git"
+    about = "Disposable coding sessions for AI agents, synced back through git",
+    long_about = "Create isolated Lima VMs for sandbox or git-native coding sessions, run an agent inside the guest, and explicitly export or sync the result back to the host.",
+    after_help = "Quick start:
+  agbranch doctor
+  agbranch base prepare
+  agbranch launch --session demo --seed . --agent codex
+
+Run `agbranch <command> --help` for command-specific examples."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -18,31 +25,55 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Build or inspect the reusable prepared VM.
     Base(BaseArgs),
+    /// Create a disposable sandbox session.
     Launch(LaunchArgs),
+    /// Create a git-native repository session.
     Open(OpenArgs),
+    /// Copy an artifact from a sandbox guest to the host.
     Export(ExportArgs),
+    /// Attach to a session-owned shell or agent.
     Attach(AttachArgs),
+    /// Start or stop a session-owned coding agent.
     Agent(AgentArgs),
     /// Inspect or change remembered credential-import policies.
     Auth(AuthArgs),
+    /// Stop an agent, optionally forcing the VM to stop.
     Kill(KillArgs),
+    /// List active sessions, or include session history.
     Ps(ListArgs),
+    /// Show detailed state for one session.
     Show(SessionArgs),
+    /// Show published localhost ports and live listeners.
     Ports(PortsArgs),
+    /// Start a stopped session VM.
     Start(SessionArgs),
+    /// Stop a session VM without closing it.
     Stop(SessionArgs),
+    /// Open a fresh tmux shell in the guest.
     Shell(ShellArgs),
+    /// Open a raw SSH connection to the guest.
     Ssh(SshArgs),
+    /// Run a non-interactive command in the guest.
     Run(RunArgs),
+    /// Sync guest git commits to the host review branch.
     SyncBack(SyncBackArgs),
+    /// Destroy a session after syncing or discarding it.
     Close(CloseArgs),
+    /// Reclaim stale local state and obsolete caches.
     Gc(JsonFlag),
+    /// Read session, provision, sync, guest, or kernel logs.
     Logs(LogsArgs),
+    /// Stream session snapshots and events.
     Watch(WatchArgs),
+    /// Recover a session stuck in a transitional state.
     Repair(SessionArgs),
     /// Resume a launch from its last completed phase.
     Retry(RetryArgs),
+    /// Generate a shell completion script on stdout.
+    Completions(CompletionsArgs),
+    /// Check host prerequisites and local state.
     Doctor(JsonFlag),
     /// Internal / troubleshooting subcommands. Hidden from top-level help
     /// but visible via `agbranch internal --help`.
@@ -101,11 +132,19 @@ pub struct BaseShowArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = "Examples:
+  agbranch launch --session demo --seed .
+  agbranch launch --session web --publish 3000 --agent codex --auth import
+
+Post-clone failures can be resumed with `agbranch retry SESSION`.")]
 pub struct LaunchArgs {
+    /// Unique session name (letters, digits, dots, underscores, and hyphens).
     #[arg(long)]
     pub session: String,
+    /// Host file or directory copied into the guest workspace.
     #[arg(long)]
     pub seed: Option<PathBuf>,
+    /// Coding agent to start inside the guest.
     #[arg(long, value_parser = ["codex", "claude", "gemini"])]
     pub agent: Option<String>,
     /// Control host auth import. Omit to reuse the provider's remembered choice,
@@ -116,24 +155,37 @@ pub struct LaunchArgs {
     /// HOST_PORT:GUEST_PORT, with an optional /tcp or /udp suffix.
     #[arg(long = "publish", value_name = "PORT")]
     pub publish: Vec<PublishedPort>,
+    /// Number of virtual CPUs for this session.
     #[arg(long)]
     pub cpus: Option<u16>,
+    /// Guest memory size, for example 8GiB.
     #[arg(long)]
     pub memory: Option<MemorySize>,
+    /// Guest disk size, for example 100GiB.
     #[arg(long)]
     pub disk: Option<DiskSize>,
+    /// Emit a machine-readable result and do not attach.
     #[arg(long)]
     pub json: bool,
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = "Examples:
+  agbranch open --session feature-x --repo .
+  agbranch open --session api --repo . --base origin/main --publish 8080 --agent claude
+
+Changes sync to the host review branch `agbranch/SESSION`; the checked-out host branch is never rewritten.")]
 pub struct OpenArgs {
+    /// Unique session name (letters, digits, dots, underscores, and hyphens).
     #[arg(long)]
     pub session: String,
+    /// Host git worktree to seed into the guest.
     #[arg(long)]
     pub repo: PathBuf,
+    /// Git ref used as the session baseline (defaults to the current branch).
     #[arg(long)]
     pub base: Option<String>,
+    /// Coding agent to start inside the guest.
     #[arg(long, value_parser = ["codex", "claude", "gemini"])]
     pub agent: Option<String>,
     /// Control host auth import. Omit to reuse the provider's remembered choice,
@@ -144,12 +196,16 @@ pub struct OpenArgs {
     /// HOST_PORT:GUEST_PORT, with an optional /tcp or /udp suffix.
     #[arg(long = "publish", value_name = "PORT")]
     pub publish: Vec<PublishedPort>,
+    /// Number of virtual CPUs for this session.
     #[arg(long)]
     pub cpus: Option<u16>,
+    /// Guest memory size, for example 8GiB.
     #[arg(long)]
     pub memory: Option<MemorySize>,
+    /// Guest disk size, for example 100GiB.
     #[arg(long)]
     pub disk: Option<DiskSize>,
+    /// Emit a machine-readable result and do not attach.
     #[arg(long)]
     pub json: bool,
 }
@@ -160,6 +216,16 @@ pub struct RetryArgs {
     pub session: SessionSelector,
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = "Install examples:
+  agbranch completions bash > ~/.local/share/bash-completion/completions/agbranch
+  agbranch completions zsh > ~/.zfunc/_agbranch
+  agbranch completions fish > ~/.config/fish/completions/agbranch.fish")]
+pub struct CompletionsArgs {
+    #[arg(value_enum)]
+    pub shell: CompletionShell,
 }
 
 #[derive(Debug, Args)]
@@ -471,6 +537,16 @@ impl AuthPreferencePolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+    Elvish,
+    #[value(name = "powershell")]
+    PowerShell,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,5 +792,26 @@ mod tests {
         let conflict = Cli::try_parse_from(["agbranch", "auth", "reset", "codex", "--all"])
             .expect_err("provider conflicts with --all");
         assert_eq!(conflict.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn completions_accepts_every_supported_shell() {
+        for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+            let cli = Cli::parse_from(["agbranch", "completions", shell]);
+            let Command::Completions(args) = cli.command else {
+                panic!("expected completions for {shell}");
+            };
+            assert_eq!(
+                args.shell,
+                match shell {
+                    "bash" => CompletionShell::Bash,
+                    "zsh" => CompletionShell::Zsh,
+                    "fish" => CompletionShell::Fish,
+                    "elvish" => CompletionShell::Elvish,
+                    "powershell" => CompletionShell::PowerShell,
+                    _ => unreachable!(),
+                }
+            );
+        }
     }
 }
