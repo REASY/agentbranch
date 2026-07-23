@@ -109,7 +109,7 @@ Run `agbranch doctor` to validate the host before your first `base prepare`.
 agbranch base prepare
 
 # Sandbox session — seeded, disposable, exit with --discard.
-# With --agent and no --json, agbranch attaches to the agent window immediately:
+# Agent launches attach by default; add --detach to return without entering tmux:
 agbranch launch --session scratch --seed ./input --agent claude --auth ask
 # Later, after detaching from tmux, re-enter with:
 agbranch attach scratch
@@ -117,7 +117,7 @@ agbranch export scratch --from ~/sandbox/scratch --to ./artifacts
 agbranch close scratch --discard --yes
 
 # Git-native repo session — review branch, bundle round-trip, exit with --sync.
-# With --agent and no --json, agbranch attaches to the agent window immediately:
+# Agent opens attach by default; add --detach to return without entering tmux:
 agbranch open --session feature-x --repo . --agent claude
 # Later, after detaching from tmux, re-enter with:
 agbranch attach feature-x
@@ -152,7 +152,7 @@ Use when you want a throwaway VM with some seed files and no expectation of merg
 
 - `launch --session <name>` clones the base VM and starts it.
 - `--seed <host-path>` copies a filtered host directory into `~/sandbox/<session>` in the guest. Built-in build/cache exclusions apply, and an optional `.agbranchignore` uses gitignore syntax for project-specific exclusions. Symlinks that resolve outside the seed root are rejected.
-- `--agent {codex|claude|gemini}` bootstraps the provider inside the VM and attaches to its tmux window.
+- `--agent {codex|claude|gemini}` bootstraps the provider inside the VM and, unless `--detach` or `--json` is used, attaches to its tmux window.
 - `--auth {import|none|ask}` controls whether detected host credentials enter the guest.
 - `--publish 3000` publishes guest TCP port 3000 on `127.0.0.1:3000`; `--publish 8080:3000` chooses a different host port.
 - `--detach` leaves the session running without attaching; `--attach` explicitly opens its agent or shell.
@@ -184,7 +184,7 @@ Coding agents aren't installed on your host — they're installed in the prepare
 
 1. imports the provider's config/auth from the host according to the selected auth policy,
 2. starts the provider in the session's tmux `agent` window,
-3. attaches you to that window in interactive mode, or returns metadata under `--json`.
+3. attaches you to that window by default, returns human output with `--detach`, or returns machine-readable metadata with `--json`.
 
 Use `--auth import` to import detected credentials without a prompt, `--auth none` to start without importing them, or `--auth ask` to force a fresh prompt when credentials are detected. The choice is remembered independently for Codex, Claude, and Gemini; omitting `--auth` reuses that choice, or prompts once in an interactive terminal when no choice exists. Non-interactive launches with no remembered choice default to no import. Auth is resolved before the VM is cloned or started, so an interactive launch does not pause after boot.
 
@@ -224,6 +224,6 @@ Published services bind only to host localhost. Add `/udp` for UDP mappings, for
 
 ## Status
 
-`agbranch 0.1.0` is under active development. The workflows and JSON contracts described above are exercised by CI on every push and by the nightly smoke suite against real Lima VMs — but no semver guarantees are made yet, and there is no published binary channel. If you want to try it, build from source and start with `agbranch doctor` and `agbranch base prepare`.
+`agbranch 0.1.1` is under active development. The workflows and JSON contracts described above are exercised by CI on every push and by the nightly smoke suite against real Lima VMs — but no semver guarantees are made yet, and there is no published binary channel. If you want to try it, build from source and start with `agbranch doctor` and `agbranch base prepare`.
 
 ---

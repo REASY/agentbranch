@@ -27,7 +27,7 @@ Layout:
 
 ```
 <state-root>/
-├── state.db        # SQLite catalog (sessions, ports, events, sync runs, preferences)
+├── state.db        # SQLite catalog (sessions, ports, launch retries, events, sync runs, preferences)
 ├── state.db-wal    # SQLite WAL journal
 ├── state.db-shm    # SQLite shared memory
 ├── logs/           # per-session log directories
