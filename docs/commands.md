@@ -7,8 +7,8 @@ Every `agbranch` subcommand, grouped by what you're trying to do. For full flag 
 | **Setup**     | `base prepare`           | Build or refresh the prepared base VM for your host (`--rebuild`, `--timeout`, `--json`).   |
 |               | `doctor`                 | Validate host: `limactl` version, platform prerequisites, orphaned VMs.                      |
 |               | `completions`             | Generate Bash, Zsh, Fish, Elvish, or PowerShell completion scripts.                          |
-| **Create**    | `launch`                 | Start a sandbox session, optionally `--seed`, `--agent`, and `--auth`.                       |
-|               | `open`                   | Start a git-native repo session, optionally `--base`, `--agent`, and `--auth`.               |
+| **Create**    | `launch`                 | Start a sandbox; supports seed, agent/auth, published ports, sizing, and attach mode.          |
+|               | `open`                   | Start a git-native repo session with base ref, agent/auth, ports, sizing, and attach mode.    |
 |               | `retry`                  | Resume a post-clone launch failure from its last completed phase.                            |
 | **Inspect**   | `ps`                     | List sessions with live status; `--all`, `--search`, `--state`, `--sort`.                    |
 |               | `ports`                  | List published localhost ports and whether guest services are listening.                     |
