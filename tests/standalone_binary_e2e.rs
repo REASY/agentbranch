@@ -37,7 +37,12 @@ fn inode_of(path: &Path) -> u64 {
 fn sha256_of(path: &Path) -> String {
     use sha2::{Digest, Sha256};
     let bytes = std::fs::read(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
-    format!("{:x}", Sha256::digest(&bytes))
+    let digest = Sha256::digest(&bytes);
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{:}", hex)
 }
 
 fn run_binary(binary: &Path, state_root: &Path, args: &[&str]) -> (String, String, i32) {
