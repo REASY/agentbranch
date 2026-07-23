@@ -131,6 +131,8 @@ Every mutating command supports `--json` for scripting. Most session-scoped comm
 
 If a launch fails after cloning its VM, agbranch preserves the session and records the last completed phase. Fix the reported cause and run `agbranch retry <session>` to continue without cloning and booting a fresh VM. Failures before cloning completes still roll back automatically.
 
+Agent launches attach to the agent window by default for compatibility. Add `--detach` to return after startup while keeping human-readable output, or use `--attach` to explicitly attach (to the agent when present, otherwise the shell). `--attach` and `--json` are mutually exclusive.
+
 Generate completion scripts directly from the current CLI definition:
 
 ```sh
@@ -153,6 +155,7 @@ Use when you want a throwaway VM with some seed files and no expectation of merg
 - `--agent {codex|claude|gemini}` bootstraps the provider inside the VM and attaches to its tmux window.
 - `--auth {import|none|ask}` controls whether detected host credentials enter the guest.
 - `--publish 3000` publishes guest TCP port 3000 on `127.0.0.1:3000`; `--publish 8080:3000` chooses a different host port.
+- `--detach` leaves the session running without attaching; `--attach` explicitly opens its agent or shell.
 - `retry <name>` resumes an interrupted launch from its last completed phase.
 - `export --from ~/sandbox/<session> --to <host-path>` pulls artifacts out before you close.
 - `close --discard --yes` destroys the VM. Sandbox sessions **cannot** close with `--sync` — that's enforced, not advisory.

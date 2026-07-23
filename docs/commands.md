@@ -41,6 +41,8 @@ Use `auth list [--json]` to inspect all three providers, `auth set PROVIDER impo
 
 `launch` and `open` accept repeatable `--publish` mappings. `--publish 3000` maps host localhost port 3000 to guest port 3000; `--publish 8080:3000` maps a different host port; append `/udp` for UDP. Published ports never bind to non-loopback host addresses. Use `agbranch ports SESSION [--json]` to inspect configured endpoints and live guest listener state.
 
+Agent launches attach to the agent window by default. Pass `--detach` to return after launch/open without switching to tmux while retaining human output. Pass `--attach` to request attachment explicitly; agentless sessions attach to their shell. Interactive `--attach` conflicts with `--json`.
+
 ## Launch and open timings
 
 Each `launch` and `open` phase is announced immediately, then reports elapsed phase and total time with millisecond precision when it completes. Human output ends with an ordered phase breakdown, each phase's percentage of wall time, and the slowest phase. The `start-vm` measurement covers the complete `limactl start` call, including Lima waiting for the guest to become ready.

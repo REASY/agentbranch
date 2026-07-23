@@ -1,3 +1,4 @@
+pub mod attachment;
 pub mod exec;
 pub mod guest_support;
 pub mod launch_retry;

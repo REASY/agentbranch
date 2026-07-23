@@ -147,6 +147,12 @@ pub struct LaunchArgs {
     /// Coding agent to start inside the guest.
     #[arg(long, value_parser = ["codex", "claude", "gemini"])]
     pub agent: Option<String>,
+    /// Attach after launch (agent when present, otherwise shell).
+    #[arg(long, conflicts_with_all = ["detach", "json"])]
+    pub attach: bool,
+    /// Return after launch without attaching.
+    #[arg(long, conflicts_with = "attach")]
+    pub detach: bool,
     /// Control host auth import. Omit to reuse the provider's remembered choice,
     /// prompting once when no choice exists.
     #[arg(long, value_enum, requires = "agent")]
@@ -188,6 +194,12 @@ pub struct OpenArgs {
     /// Coding agent to start inside the guest.
     #[arg(long, value_parser = ["codex", "claude", "gemini"])]
     pub agent: Option<String>,
+    /// Attach after open (agent when present, otherwise shell).
+    #[arg(long, conflicts_with_all = ["detach", "json"])]
+    pub attach: bool,
+    /// Return after open without attaching.
+    #[arg(long, conflicts_with = "attach")]
+    pub detach: bool,
     /// Control host auth import. Omit to reuse the provider's remembered choice,
     /// prompting once when no choice exists.
     #[arg(long, value_enum, requires = "agent")]
@@ -682,6 +694,61 @@ mod tests {
             panic!("expected open");
         };
         assert_eq!(args.publish[0].host_port, 5173);
+    }
+
+    #[test]
+    fn launch_and_open_accept_explicit_attachment_modes() {
+        let cli = Cli::parse_from(["agbranch", "launch", "--session", "demo", "--detach"]);
+        let Command::Launch(args) = cli.command else {
+            panic!("expected launch");
+        };
+        assert!(args.detach);
+        assert!(!args.attach);
+
+        let cli = Cli::parse_from([
+            "agbranch",
+            "open",
+            "--session",
+            "demo",
+            "--repo",
+            ".",
+            "--attach",
+        ]);
+        let Command::Open(args) = cli.command else {
+            panic!("expected open");
+        };
+        assert!(args.attach);
+        assert!(!args.detach);
+    }
+
+    #[test]
+    fn attachment_modes_reject_conflicting_output_or_direction() {
+        let conflict = Cli::try_parse_from([
+            "agbranch",
+            "launch",
+            "--session",
+            "demo",
+            "--attach",
+            "--detach",
+        ])
+        .expect_err("attachment direction must be unique");
+        assert_eq!(conflict.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        let json_conflict = Cli::try_parse_from([
+            "agbranch",
+            "open",
+            "--session",
+            "demo",
+            "--repo",
+            ".",
+            "--attach",
+            "--json",
+        ])
+        .expect_err("interactive attach conflicts with json");
+        assert_eq!(
+            json_conflict.kind(),
+            clap::error::ErrorKind::ArgumentConflict
+        );
     }
 
     #[test]

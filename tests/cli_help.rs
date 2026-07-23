@@ -54,6 +54,8 @@ fn launch_and_open_help_include_examples_and_resource_guidance() {
         .success()
         .stdout(predicate::str::contains("Examples:"))
         .stdout(predicate::str::contains("8GiB"))
+        .stdout(predicate::str::contains("--attach"))
+        .stdout(predicate::str::contains("--detach"))
         .stdout(predicate::str::contains("agbranch retry SESSION"));
 
     Command::cargo_bin("agbranch")

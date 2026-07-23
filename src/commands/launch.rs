@@ -18,6 +18,7 @@ use crate::lima::client::{LimaClient, LimactlClient};
 use crate::platform::host::HostContext;
 use crate::policy::artifacts::{ArtifactPolicy, FilteredSeedTree};
 use crate::ports::{PublishedPort, validate_published_ports};
+use crate::session::attachment::{InitialAttachTarget, initial_attach_target};
 use crate::session::guest_support;
 use crate::session::launch_retry::{
     AGENT_STARTED, GUEST_SUPPORT_INSTALLED, PORTS_CONFIGURED, SHELL_READY, VM_CLONED, VM_STARTED,
@@ -319,11 +320,13 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
         );
     } else {
         eprintln!("{}", timing_summary.render_human("launch", &session_name));
-        if provider.is_some() {
+        if let Some(target) =
+            initial_attach_target(provider.is_some(), args.attach, args.detach, args.json)
+        {
             crate::commands::attach::run(crate::cli::AttachArgs {
                 session: crate::cli::SessionSelector::from_session(args.session),
-                shell: false,
-                agent: true,
+                shell: target == InitialAttachTarget::Shell,
+                agent: target == InitialAttachTarget::Agent,
                 json: false,
             })?;
         }
