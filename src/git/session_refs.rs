@@ -108,52 +108,6 @@ pub fn is_ancestor(
     }
 }
 
-pub fn update_ref(
-    runner: &dyn CommandRunner,
-    repo_root: &Path,
-    reference: &str,
-    oid: &str,
-) -> Result<(), crate::error::process::ProcessError> {
-    runner.run(
-        "git",
-        &[
-            "update-ref".to_owned(),
-            reference.to_owned(),
-            oid.to_owned(),
-        ],
-        Some(repo_root),
-        &BTreeMap::new(),
-    )?;
-    Ok(())
-}
-
-fn compare_and_swap_ref(
-    runner: &dyn CommandRunner,
-    repo_root: &Path,
-    reference: &str,
-    oid: &str,
-    expected_oid: &str,
-) -> Result<bool, crate::error::process::ProcessError> {
-    match runner.run(
-        "git",
-        &[
-            "update-ref".to_owned(),
-            reference.to_owned(),
-            oid.to_owned(),
-            expected_oid.to_owned(),
-        ],
-        Some(repo_root),
-        &BTreeMap::new(),
-    ) {
-        Ok(_) => Ok(true),
-        // `git update-ref` fails when the ref no longer contains the expected
-        // object. Surface that as divergence instead of overwriting a
-        // concurrent update.
-        Err(crate::error::process::ProcessError::Failed { .. }) => Ok(false),
-        Err(err) => Err(err),
-    }
-}
-
 pub fn delete_ref_if_exists(
     runner: &dyn CommandRunner,
     repo_root: &Path,
@@ -175,31 +129,40 @@ pub fn delete_ref_if_exists(
     Ok(())
 }
 
-pub fn fast_forward_review_branch(
+pub fn publish_synced_refs(
     runner: &dyn CommandRunner,
     repo_root: &Path,
     review_branch: &str,
-    source_ref: &str,
+    source_oid: &str,
+    session_head_ref: &str,
+    expected_session_head: &str,
 ) -> Result<bool, crate::error::process::ProcessError> {
     let review_ref = format!("refs/heads/{review_branch}");
-    if !ref_exists(runner, repo_root, &review_ref)? {
-        let source_oid = resolve_ref_oid(runner, repo_root, source_ref)?;
-        return compare_and_swap_ref(
-            runner,
-            repo_root,
-            &review_ref,
-            &source_oid,
-            "0000000000000000000000000000000000000000",
-        );
-    }
+    let expected_review_oid = if ref_exists(runner, repo_root, &review_ref)? {
+        let oid = resolve_ref_oid(runner, repo_root, &review_ref)?;
+        if !is_ancestor(runner, repo_root, &oid, source_oid)? {
+            return Ok(false);
+        }
+        oid
+    } else {
+        "0000000000000000000000000000000000000000".to_owned()
+    };
 
-    let review_oid = resolve_ref_oid(runner, repo_root, &review_ref)?;
-    let source_oid = resolve_ref_oid(runner, repo_root, source_ref)?;
-    if !is_ancestor(runner, repo_root, &review_oid, &source_oid)? {
-        return Ok(false);
+    let transaction = format!(
+        "start\nupdate {review_ref} {source_oid} {expected_review_oid}\n\
+         update {session_head_ref} {source_oid} {expected_session_head}\nprepare\ncommit\n"
+    );
+    match runner.run_with_input(
+        "git",
+        &["update-ref".to_owned(), "--stdin".to_owned()],
+        Some(repo_root),
+        &BTreeMap::new(),
+        transaction.as_bytes(),
+    ) {
+        Ok(_) => Ok(true),
+        Err(crate::error::process::ProcessError::Failed { .. }) => Ok(false),
+        Err(err) => Err(err),
     }
-
-    compare_and_swap_ref(runner, repo_root, &review_ref, &source_oid, &review_oid)
 }
 
 #[cfg(test)]
@@ -209,6 +172,7 @@ mod tests {
     use crate::util::process::CommandOutput;
     use std::cell::RefCell;
     use std::path::PathBuf;
+    use std::process::Command;
     use tempfile::tempdir;
 
     #[test]
@@ -251,6 +215,7 @@ mod tests {
         program: String,
         args: Vec<String>,
         cwd: Option<PathBuf>,
+        input: Option<Vec<u8>>,
     }
 
     impl CommandRunner for RecordingRunner {
@@ -265,6 +230,27 @@ mod tests {
                 program: program.to_owned(),
                 args: args.to_vec(),
                 cwd: cwd.map(Path::to_path_buf),
+                input: None,
+            });
+            Ok(CommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_with_input(
+            &self,
+            program: &str,
+            args: &[String],
+            cwd: Option<&Path>,
+            _env: &BTreeMap<String, String>,
+            input: &[u8],
+        ) -> Result<CommandOutput, crate::error::process::ProcessError> {
+            self.calls.borrow_mut().push(RecordedCall {
+                program: program.to_owned(),
+                args: args.to_vec(),
+                cwd: cwd.map(Path::to_path_buf),
+                input: Some(input.to_vec()),
             });
             Ok(CommandOutput {
                 stdout: String::new(),
@@ -309,32 +295,187 @@ mod tests {
     }
 
     #[test]
-    fn compare_and_swap_ref_passes_expected_old_oid_to_git() {
+    fn publish_synced_refs_uses_one_ref_transaction() {
         let runner = RecordingRunner::default();
         let repo = Path::new("/tmp/repo");
+        let source = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let review = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let session = "cccccccccccccccccccccccccccccccccccccccc";
 
-        let updated = compare_and_swap_ref(
-            &runner,
-            repo,
-            "refs/heads/agbranch/demo",
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
-        .expect("update-ref");
+        // The generic recording runner returns empty resolutions, so exercise
+        // the exact transaction format through a runner with deterministic refs.
+        struct RefRunner(RecordingRunner);
+        impl CommandRunner for RefRunner {
+            fn run(
+                &self,
+                program: &str,
+                args: &[String],
+                cwd: Option<&Path>,
+                env: &BTreeMap<String, String>,
+            ) -> Result<CommandOutput, crate::error::process::ProcessError> {
+                let stdout = match args {
+                    [cmd, reference]
+                        if cmd == "rev-parse" && reference == "refs/heads/agbranch/demo" =>
+                    {
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n".to_owned()
+                    }
+                    _ => String::new(),
+                };
+                self.0.calls.borrow_mut().push(RecordedCall {
+                    program: program.to_owned(),
+                    args: args.to_vec(),
+                    cwd: cwd.map(Path::to_path_buf),
+                    input: None,
+                });
+                let _ = env;
+                Ok(CommandOutput {
+                    stdout,
+                    stderr: String::new(),
+                })
+            }
 
-        assert!(updated);
-        let calls = runner.calls.borrow();
-        assert_eq!(
-            calls[0].args,
-            vec![
-                "update-ref",
-                "refs/heads/agbranch/demo",
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
+            fn run_with_input(
+                &self,
+                program: &str,
+                args: &[String],
+                cwd: Option<&Path>,
+                _env: &BTreeMap<String, String>,
+                input: &[u8],
+            ) -> Result<CommandOutput, crate::error::process::ProcessError> {
+                self.0.calls.borrow_mut().push(RecordedCall {
+                    program: program.to_owned(),
+                    args: args.to_vec(),
+                    cwd: cwd.map(Path::to_path_buf),
+                    input: Some(input.to_vec()),
+                });
+                Ok(CommandOutput {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let runner = RefRunner(runner);
+        assert!(
+            publish_synced_refs(
+                &runner,
+                repo,
+                "agbranch/demo",
+                source,
+                "refs/agbranch/sessions/demo/head",
+                session,
+            )
+            .expect("publish")
         );
+        let calls = runner.0.calls.borrow();
+        let transaction = calls.last().expect("transaction");
+        assert_eq!(transaction.args, ["update-ref", "--stdin"]);
+        let input = String::from_utf8(transaction.input.clone().expect("input")).expect("utf8");
+        assert!(input.starts_with("start\n"));
+        assert!(input.contains(&format!(
+            "update refs/heads/agbranch/demo {source} {review}"
+        )));
+        assert!(input.contains(&format!(
+            "update refs/agbranch/sessions/demo/head {source} {session}"
+        )));
+        assert!(input.ends_with("prepare\ncommit\n"));
+    }
+
+    #[test]
+    fn ref_transaction_does_not_partially_publish_after_concurrent_change() {
+        let dir = tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        assert!(
+            Command::new("git")
+                .args(["init", "-b", "main"])
+                .arg(&repo)
+                .status()
+                .expect("git init")
+                .success()
+        );
+        std::fs::write(repo.join("state"), "a").expect("state a");
+        git_commit(&repo, "a");
+        let oid_a = git_oid(&repo, "HEAD");
+        git_ref(&repo, "refs/heads/agbranch/demo", &oid_a);
+        git_ref(&repo, "refs/agbranch/sessions/demo/head", &oid_a);
+
+        std::fs::write(repo.join("state"), "b").expect("state b");
+        git_commit(&repo, "b");
+        let oid_b = git_oid(&repo, "HEAD");
+        git_ref(&repo, "refs/agbranch/sessions/demo/incoming", &oid_b);
+
+        std::fs::write(repo.join("state"), "c").expect("state c");
+        git_commit(&repo, "c");
+        let oid_c = git_oid(&repo, "HEAD");
+        git_ref(&repo, "refs/agbranch/sessions/demo/head", &oid_c);
+
+        let published = publish_synced_refs(
+            &crate::util::process::RealCommandRunner,
+            &repo,
+            "agbranch/demo",
+            &oid_b,
+            "refs/agbranch/sessions/demo/head",
+            &oid_a,
+        )
+        .expect("publish result");
+
+        assert!(!published);
+        assert_eq!(git_oid(&repo, "refs/heads/agbranch/demo"), oid_a);
+        assert_eq!(git_oid(&repo, "refs/agbranch/sessions/demo/head"), oid_c);
+    }
+
+    fn git_commit(repo: &Path, message: &str) {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(["add", "."])
+                .status()
+                .expect("git add")
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args([
+                    "-c",
+                    "user.name=agbranch-tests",
+                    "-c",
+                    "user.email=agbranch@example.invalid",
+                    "commit",
+                    "-m",
+                    message,
+                ])
+                .status()
+                .expect("git commit")
+                .success()
+        );
+    }
+
+    fn git_ref(repo: &Path, reference: &str, oid: &str) {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(["update-ref", reference, oid])
+                .status()
+                .expect("git update-ref")
+                .success()
+        );
+    }
+
+    fn git_oid(repo: &Path, reference: &str) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["rev-parse", reference])
+            .output()
+            .expect("git rev-parse");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .expect("utf8")
+            .trim()
+            .to_owned()
     }
 }

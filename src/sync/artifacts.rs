@@ -2,10 +2,11 @@ use crate::cli::SyncBackArgs;
 use crate::error::AppError;
 use crate::error::sync::SyncError;
 use crate::types::HostPath;
+use crate::util::process::run_with_limits;
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SyncBackOutcome {
@@ -56,29 +57,23 @@ fn export_patch_for_ref_range(
         })?;
     }
 
-    let output = Command::new("git")
-        .current_dir(repo_root)
-        .arg("diff")
-        .arg("--binary")
-        .arg("--src-prefix=a/")
-        .arg("--dst-prefix=b/")
-        .arg(current_head)
-        .arg(fetched_head)
-        .output()
-        .map_err(|source| SyncError::Io {
-            path: output_path.to_path_buf(),
-            source,
-        })?;
+    let output = run_with_limits(
+        "git",
+        &[
+            "diff".to_owned(),
+            "--binary".to_owned(),
+            "--src-prefix=a/".to_owned(),
+            "--dst-prefix=b/".to_owned(),
+            current_head.to_owned(),
+            fetched_head.to_owned(),
+        ],
+        Some(repo_root),
+        Duration::from_secs(5 * 60),
+        256 * 1024 * 1024,
+        &[0, 1],
+    )?;
 
-    let status = output.status.code().unwrap_or(1);
-    if status != 0 && status != 1 {
-        return Err(SyncError::GitDiffFailed {
-            status,
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        });
-    }
-
-    fs::write(output_path, output.stdout).map_err(|source| SyncError::Io {
+    fs::write(output_path, output.stdout.as_bytes()).map_err(|source| SyncError::Io {
         path: output_path.to_path_buf(),
         source,
     })?;

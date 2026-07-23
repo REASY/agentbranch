@@ -207,7 +207,7 @@ fn run_sync_close(
             host,
             sync_state,
         },
-        sync::run_with_catalog,
+        sync::run_with_catalog_silent,
         delete_vm,
         utc_now,
     )

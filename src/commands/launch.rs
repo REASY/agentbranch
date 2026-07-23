@@ -13,6 +13,7 @@ use crate::db::sessions::{
 use crate::error::{AppError, ValidationError};
 use crate::lima::client::{LimaClient, LimactlClient};
 use crate::platform::host::HostContext;
+use crate::policy::artifacts::{ArtifactPolicy, FilteredSeedTree};
 use crate::session::guest_support;
 use crate::session::orchestration::{LockMetadataGuard, SessionGuard, run_step};
 use crate::session::paths::{sandbox_workspace_path, tmux_socket_path};
@@ -159,7 +160,15 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
                 "launch",
                 "seed-workspace",
                 &launch_started,
-                || Ok(lima.copy_host_path_to_guest(seed, &vm_name, &workspace)?),
+                || {
+                    let policy = ArtifactPolicy::load(seed.as_path())?;
+                    let filtered = FilteredSeedTree::materialize(seed.as_path(), &policy)?;
+                    Ok(lima.copy_host_path_to_guest(
+                        &HostPath::new(filtered.path()),
+                        &vm_name,
+                        &workspace,
+                    )?)
+                },
             )?;
         }
         update_lifecycle_state_with_timestamps(

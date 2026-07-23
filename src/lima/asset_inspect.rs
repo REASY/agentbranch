@@ -175,10 +175,7 @@ fn inspect_override(path: &Path) -> LimaAssetInspectState {
 }
 
 fn inspect_cache(host: &HostContext) -> LimaAssetInspectState {
-    let canonical = host
-        .state_roots
-        .assets
-        .join(CURRENT_ASSET_BUNDLE_FINGERPRINT);
+    let canonical = crate::lima::asset_resolver::canonical_cache_dir(host);
     let lima_dir = canonical.join("lima");
 
     if !canonical.is_dir() || !lima_dir.is_dir() {
@@ -553,6 +550,26 @@ mod tests {
     }
 
     #[test]
+    fn valid_path_safe_cache_is_reported_as_ready() {
+        let dir = tempdir().expect("tempdir");
+        let _env = EnvGuard::new();
+        let host = make_host(dir.path());
+        let canonical = crate::lima::asset_resolver::canonical_cache_dir(&host);
+        let lima = make_lima_tree(&canonical);
+        std::fs::write(
+            canonical.join("fingerprint.ok"),
+            CURRENT_ASSET_BUNDLE_FINGERPRINT,
+        )
+        .expect("fingerprint marker");
+
+        let inspect = inspect_lima_asset_dir(&host);
+        let LimaAssetInspectState::Cache { path, .. } = inspect.state else {
+            panic!("expected ready cache, got {:?}", inspect.state);
+        };
+        assert_eq!(path, lima);
+    }
+
+    #[test]
     fn env_override_complete_tree_is_env_override() {
         let dir = tempdir().expect("tempdir");
         let env = EnvGuard::new();
@@ -655,10 +672,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let _env = EnvGuard::new();
         let host = make_host(dir.path());
-        let canonical = host
-            .state_roots
-            .assets
-            .join(CURRENT_ASSET_BUNDLE_FINGERPRINT);
+        let canonical = crate::lima::asset_resolver::canonical_cache_dir(&host);
         std::fs::create_dir_all(canonical.join("lima").join("provision")).unwrap();
         std::fs::create_dir_all(canonical.join("lima").join("guest")).unwrap();
         std::fs::write(canonical.join("fingerprint.ok"), "sha256:bogus\n").unwrap();
@@ -756,10 +770,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let _env = EnvGuard::new();
         let host = make_host(dir.path());
-        let canonical = host
-            .state_roots
-            .assets
-            .join(CURRENT_ASSET_BUNDLE_FINGERPRINT);
+        let canonical = crate::lima::asset_resolver::canonical_cache_dir(&host);
         std::fs::create_dir_all(canonical.join("lima").join("provision")).unwrap();
         std::fs::create_dir_all(canonical.join("lima").join("guest")).unwrap();
         // No fingerprint.ok written.
@@ -778,10 +789,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let _env = EnvGuard::new();
         let host = make_host(dir.path());
-        let canonical = host
-            .state_roots
-            .assets
-            .join(CURRENT_ASSET_BUNDLE_FINGERPRINT);
+        let canonical = crate::lima::asset_resolver::canonical_cache_dir(&host);
         std::fs::create_dir_all(canonical.join("lima").join("provision")).unwrap();
         std::fs::create_dir_all(canonical.join("lima").join("guest")).unwrap();
         std::fs::write(
@@ -867,10 +875,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let _env = EnvGuard::new();
         let host = make_host(dir.path());
-        let canonical = host
-            .state_roots
-            .assets
-            .join(CURRENT_ASSET_BUNDLE_FINGERPRINT);
+        let canonical = crate::lima::asset_resolver::canonical_cache_dir(&host);
         std::fs::create_dir_all(canonical.join("lima").join("provision")).unwrap();
         std::fs::create_dir_all(canonical.join("lima").join("guest")).unwrap();
         for asset in EMBEDDED_LIMA_ASSETS {

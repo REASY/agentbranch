@@ -1,35 +1,41 @@
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ArtifactPolicy {
-    patterns: Vec<String>,
+    matcher: Gitignore,
 }
 
 impl ArtifactPolicy {
     pub fn load(repo_root: &Path) -> std::io::Result<Self> {
-        let mut patterns = load_patterns(include_str!("../../policy/sync-excludes.txt"));
+        let mut builder = GitignoreBuilder::new(repo_root);
+        add_patterns(
+            &mut builder,
+            None,
+            include_str!("../../policy/sync-excludes.txt"),
+        )?;
         let repo_ignore = repo_root.join(".agbranchignore");
         if repo_ignore.exists() {
-            patterns.extend(load_patterns(&fs::read_to_string(repo_ignore)?));
+            add_patterns(
+                &mut builder,
+                Some(&repo_ignore),
+                &fs::read_to_string(&repo_ignore)?,
+            )?;
         }
-        Ok(Self { patterns })
+        let matcher = builder.build().map_err(std::io::Error::other)?;
+        Ok(Self { matcher })
     }
 
     pub fn is_excluded(&self, path: &Path) -> bool {
-        let rendered = path.to_string_lossy();
-        self.patterns
-            .iter()
-            .any(|pattern| rendered.contains(pattern))
+        self.is_excluded_with_type(path, false)
     }
-}
 
-pub fn path_is_excluded(path: &Path) -> bool {
-    ArtifactPolicy {
-        patterns: load_patterns(include_str!("../../policy/sync-excludes.txt")),
+    fn is_excluded_with_type(&self, path: &Path, is_dir: bool) -> bool {
+        self.matcher
+            .matched_path_or_any_parents(path, is_dir)
+            .is_ignore()
     }
-    .is_excluded(path)
 }
 
 pub fn collect_excluded_paths(
@@ -50,19 +56,18 @@ pub fn collect_excluded_paths(
     Ok(excluded)
 }
 
+#[derive(Debug)]
 pub struct FilteredSeedTree {
-    path: PathBuf,
+    dir: tempfile::TempDir,
 }
 
 impl FilteredSeedTree {
     pub fn materialize(repo_root: &Path, policy: &ArtifactPolicy) -> std::io::Result<Self> {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("agbranch-seed-{}-{unique}", std::process::id()));
-        fs::create_dir_all(&path)?;
+        let dir = tempfile::Builder::new()
+            .prefix("agbranch-seed-")
+            .tempdir()?;
+        let path = dir.path();
+        let canonical_root = repo_root.canonicalize()?;
         visit_tree(
             repo_root,
             repo_root,
@@ -73,31 +78,45 @@ impl FilteredSeedTree {
                 if let Some(parent) = destination.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                if source.is_dir() {
+                let source_type = fs::symlink_metadata(&source)?.file_type();
+                if source_type.is_symlink() {
+                    let canonical_target = source.canonicalize()?;
+                    if !canonical_target.starts_with(&canonical_root) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            format!(
+                                "seed symlink `{}` resolves outside `{}`",
+                                source.display(),
+                                repo_root.display()
+                            ),
+                        ));
+                    }
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(fs::read_link(&source)?, &destination)?;
+                    #[cfg(not(unix))]
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "seed symlinks are only supported on Unix hosts",
+                    ));
+                } else if source_type.is_dir() {
                     fs::create_dir_all(&destination)?;
-                } else if source.is_file() {
+                } else if source_type.is_file() {
                     fs::copy(&source, &destination)?;
                 }
                 Ok(())
             },
             &mut |_| Ok(()),
         )?;
-        Ok(Self { path })
+        Ok(Self { dir })
     }
 
     pub fn path(&self) -> &Path {
-        &self.path
+        self.dir.path()
     }
 }
 
 pub fn scrub_tree(root: &Path, policy: &ArtifactPolicy) -> std::io::Result<()> {
     scrub_tree_inner(root, root, policy)
-}
-
-impl Drop for FilteredSeedTree {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
 }
 
 fn scrub_tree_inner(
@@ -111,8 +130,9 @@ fn scrub_tree_inner(
         let relative = path
             .strip_prefix(repo_root)
             .map_err(std::io::Error::other)?;
-        if policy.is_excluded(relative) {
-            if entry.file_type()?.is_dir() {
+        let file_type = entry.file_type()?;
+        if policy.is_excluded_with_type(relative, file_type.is_dir()) {
+            if file_type.is_dir() {
                 fs::remove_dir_all(&path)?;
             } else {
                 fs::remove_file(&path)?;
@@ -120,7 +140,7 @@ fn scrub_tree_inner(
             continue;
         }
 
-        if entry.file_type()?.is_dir() {
+        if file_type.is_dir() {
             scrub_tree_inner(repo_root, &path, policy)?;
         }
     }
@@ -140,23 +160,81 @@ fn visit_tree(
         let relative = path
             .strip_prefix(repo_root)
             .map_err(std::io::Error::other)?;
-        if policy.is_excluded(relative) {
+        let file_type = entry.file_type()?;
+        if policy.is_excluded_with_type(relative, file_type.is_dir()) {
             exclude(relative)?;
             continue;
         }
         include(relative)?;
-        if entry.file_type()?.is_dir() {
+        if file_type.is_dir() {
             visit_tree(repo_root, &path, policy, include, exclude)?;
         }
     }
     Ok(())
 }
 
-fn load_patterns(raw: &str) -> Vec<String> {
-    raw.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|line| line.trim_matches('*').trim_end_matches('/').to_owned())
-        .filter(|line| !line.is_empty())
-        .collect()
+fn add_patterns(
+    builder: &mut GitignoreBuilder,
+    source: Option<&Path>,
+    raw: &str,
+) -> std::io::Result<()> {
+    for line in raw.lines() {
+        if let Err(err) = builder.add_line(source.map(Path::to_path_buf), line) {
+            return Err(std::io::Error::other(err));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn materialized_seed_honors_builtin_and_repo_patterns() {
+        let source = tempdir().expect("source");
+        fs::create_dir_all(source.path().join("nested/target")).expect("target dir");
+        fs::create_dir_all(source.path().join("nested/src")).expect("src dir");
+        fs::write(source.path().join("nested/target/cache"), "generated").expect("cache");
+        fs::write(source.path().join("nested/src/lib.rs"), "source").expect("source");
+        fs::write(source.path().join("local.secret"), "secret").expect("secret");
+        fs::write(source.path().join(".agbranchignore"), "local.secret\n").expect("ignore");
+
+        let policy = ArtifactPolicy::load(source.path()).expect("policy");
+        let filtered = FilteredSeedTree::materialize(source.path(), &policy).expect("filtered");
+
+        assert!(!filtered.path().join("nested/target").exists());
+        assert!(!filtered.path().join("local.secret").exists());
+        assert!(filtered.path().join("nested/src/lib.rs").is_file());
+        assert!(filtered.path().join(".agbranchignore").is_file());
+    }
+
+    #[test]
+    fn matching_uses_paths_instead_of_substrings() {
+        let source = tempdir().expect("source");
+        fs::create_dir_all(source.path().join("retargeting")).expect("dir");
+        fs::write(source.path().join("retargeting/notes"), "keep").expect("notes");
+
+        let policy = ArtifactPolicy::load(source.path()).expect("policy");
+        assert!(!policy.is_excluded(Path::new("retargeting/notes")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialized_seed_refuses_symlinks_outside_the_seed_root() {
+        let source = tempdir().expect("source");
+        let outside = tempdir().expect("outside");
+        fs::write(outside.path().join("credentials"), "secret").expect("credentials");
+        std::os::unix::fs::symlink(
+            outside.path().join("credentials"),
+            source.path().join("credentials-link"),
+        )
+        .expect("symlink");
+
+        let policy = ArtifactPolicy::load(source.path()).expect("policy");
+        let err = FilteredSeedTree::materialize(source.path(), &policy)
+            .expect_err("external symlink must be rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
 }

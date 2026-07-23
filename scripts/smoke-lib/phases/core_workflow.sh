@@ -22,6 +22,10 @@ phase_happy_path() {
   local export_file="${ARTIFACT_DIR}/sandbox-report.md"
 
   seed_dir="$(create_fixture_repo "${sandbox_session}-seed")"
+  mkdir -p "${seed_dir}/target"
+  printf 'excluded\n' > "${seed_dir}/target/build-output"
+  printf 'excluded\n' > "${seed_dir}/local.secret"
+  printf 'local.secret\n' > "${seed_dir}/.agbranchignore"
   repo="$(create_fixture_repo "${repo_session}")"
   remember_session "${sandbox_session}"
   remember_session "${repo_session}"
@@ -29,7 +33,9 @@ phase_happy_path() {
 
   "${AGBRANCH_BIN}" launch --session "${sandbox_session}" --seed "${seed_dir}" --json > "${ARTIFACT_DIR}/launch.json"
   assert_json "${ARTIFACT_DIR}/launch.json" '.session == "'"${sandbox_session}"'" and .guest_workspace_path != null and .lifecycle_state == "running"'
-  "${AGBRANCH_BIN}" run --session "${sandbox_session}" -- bash -lc "test \"\$AGBRANCH_SESSION\" = '${sandbox_session}' && test -f README.md && grep -q 'AgentBranch Smoke Fixture' README.md"
+  "${AGBRANCH_BIN}" run --session "${sandbox_session}" -- bash -lc "test \"\$AGBRANCH_SESSION\" = '${sandbox_session}' && test -f README.md && grep -q 'AgentBranch Smoke Fixture' README.md && test ! -e target && test ! -e local.secret"
+  "${AGBRANCH_BIN}" run --session "${sandbox_session}" -- sudo bash -lc \
+    'iptables -C AGBRANCH_OUTPUT_GUARD -d 10.0.0.0/8 -j REJECT && iptables -C AGBRANCH_FORWARD_GUARD -d 192.168.0.0/16 -j REJECT'
   "${AGBRANCH_BIN}" run --session "${sandbox_session}" -- bash -lc 'printf "\nsandbox-export\n" >> README.md'
   "${AGBRANCH_BIN}" export --session "${sandbox_session}" --from \~/sandbox/"${sandbox_session}"/README.md --to "${export_file}" --json > "${ARTIFACT_DIR}/export.json"
   assert_json "${ARTIFACT_DIR}/export.json" '.session == "'"${sandbox_session}"'" and .to != null'

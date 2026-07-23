@@ -3,12 +3,13 @@ use crate::db::events::append_event;
 use crate::db::models::{EventLevel, LifecycleState, SyncDirection, SyncRunResult, SyncState};
 use crate::db::sessions::{SessionRow, update_lifecycle_state_with_timestamps, update_sync_state};
 use crate::db::sync_runs::{finish_sync_run, insert_sync_run};
+use crate::error::db::DbError;
 use crate::error::{AppError, ValidationError};
 use crate::git::bundle::{
     create_guest_sync_bundle, fetch_bundle_ref, guest_head_ref, guest_repo_is_dirty,
 };
 use crate::git::session_refs::{
-    fast_forward_review_branch, incoming_ref_name, is_ancestor, resolve_ref_oid, update_ref,
+    incoming_ref_name, is_ancestor, publish_synced_refs, resolve_ref_oid,
 };
 use crate::lima::inspect::LimaInstanceStatus;
 use crate::lima::instance::{list_instances, start_instance};
@@ -79,15 +80,16 @@ fn record_sync_outcome(
             ),
         };
 
+    let tx = catalog.unchecked_transaction().map_err(DbError::from)?;
     let sync_run_id = insert_sync_run(
-        catalog,
+        &tx,
         session_name,
         SyncDirection::SyncBack,
         result,
         started_at,
     )?;
     finish_sync_run(
-        catalog,
+        &tx,
         sync_run_id,
         result,
         completed_at,
@@ -96,16 +98,16 @@ fn record_sync_outcome(
         error_text.as_deref(),
     )?;
     append_event(
-        catalog,
+        &tx,
         session_name,
         event_level,
         event_kind,
         &event_message,
         completed_at,
     )?;
-    update_sync_state(catalog, session_name, sync_state, &completed_at)?;
+    update_sync_state(&tx, session_name, sync_state, &completed_at)?;
     update_lifecycle_state_with_timestamps(
-        catalog,
+        &tx,
         session_name,
         LifecycleState::Running,
         &completed_at,
@@ -113,6 +115,7 @@ fn record_sync_outcome(
         None,
         None,
     )?;
+    tx.commit().map_err(DbError::from)?;
     Ok(())
 }
 
@@ -233,11 +236,13 @@ where
         );
     }
 
-    let review_updated = fast_forward_review_branch(
+    let review_updated = publish_synced_refs(
         runner,
         host_git_root.as_path(),
         review_branch,
-        &incoming_ref,
+        &fetched_head,
+        session_ref_head,
+        &current_head,
     )?;
     if !review_updated {
         let artifacts = prepare_blocked_sync_artifacts(
@@ -258,13 +263,6 @@ where
             emit_outcome_fn,
         );
     }
-    update_ref(
-        runner,
-        host_git_root.as_path(),
-        session_ref_head,
-        &fetched_head,
-    )?;
-
     let completed_at = now_fn();
     record_sync_outcome(
         catalog,
@@ -498,6 +496,21 @@ mod tests {
                 }
                 other => panic!("unexpected limactl invocation: {other:?}"),
             }
+        }
+
+        fn run_with_input(
+            &self,
+            program: &str,
+            args: &[String],
+            cwd: Option<&Path>,
+            env: &BTreeMap<String, String>,
+            input: &[u8],
+        ) -> Result<crate::util::process::CommandOutput, crate::error::process::ProcessError>
+        {
+            if program == "limactl" {
+                panic!("unexpected limactl stdin invocation");
+            }
+            RealCommandRunner.run_with_input(program, args, cwd, env, input)
         }
     }
 
@@ -782,6 +795,67 @@ mod tests {
             apply_check.success(),
             "blocked sync salvage patch should apply cleanly on the host repo"
         );
+    }
+
+    #[test]
+    fn sync_outcome_rolls_back_all_state_when_event_write_fails() {
+        let dir = tempdir().expect("tempdir");
+        let conn = open_catalog(&dir.path().join("state.db")).expect("catalog");
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        fs::write(repo.join("README.md"), "initial\n").expect("readme");
+        git_commit_all(&repo, "initial");
+        let at = Timestamp::parse_rfc3339("2026-04-15T00:00:00Z").expect("timestamp");
+        let session = seed_runtime_repo_session(
+            &conn,
+            "transaction-rollback",
+            &repo,
+            &GuestPath::new("/home/tester/workspaces/transaction-rollback/repo"),
+            at,
+        );
+        conn.execute_batch(
+            "CREATE TRIGGER fail_sync_event
+             BEFORE INSERT ON session_events
+             WHEN NEW.kind = 'sync_back.git_native'
+             BEGIN
+               SELECT RAISE(ABORT, 'injected event failure');
+             END;",
+        )
+        .expect("failure trigger");
+
+        let err = record_sync_outcome(
+            &conn,
+            &session,
+            at,
+            at,
+            SyncOutcome::Success {
+                staged_path: &HostPath::new(dir.path().join("sync.bundle")),
+            },
+        )
+        .expect_err("injected failure");
+        assert!(err.to_string().contains("injected event failure"));
+
+        let sync_runs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_runs WHERE session_name = ?1",
+                [&session],
+                |row| row.get(0),
+            )
+            .expect("sync run count");
+        let events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_events WHERE session_name = ?1",
+                [&session],
+                |row| row.get(0),
+            )
+            .expect("event count");
+        let runtime = find_session(&conn, &session)
+            .expect("find session")
+            .expect("session");
+        assert_eq!(sync_runs, 0);
+        assert_eq!(events, 0);
+        assert_eq!(runtime.sync_state, SyncState::Pending);
+        assert_eq!(runtime.lifecycle_state, LifecycleState::Running);
     }
 
     use crate::testing::host_context;

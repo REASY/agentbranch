@@ -1,8 +1,9 @@
 use crate::error::sync::SyncError;
+use crate::util::process::run_with_limits;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 static NEXT_TEMP_PATCH_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -71,32 +72,24 @@ pub fn export_patch_from_entries(
         }
     }
 
-    let output = Command::new("git")
-        .current_dir(&scratch)
-        .arg("diff")
-        .arg("--no-index")
-        .arg("--binary")
-        .arg("--src-prefix=a/")
-        .arg("--dst-prefix=b/")
-        .arg("old")
-        .arg("new")
-        .output()
-        .map_err(|source| SyncError::Io {
-            path: output_path.to_path_buf(),
-            source,
-        })?;
+    let output = run_with_limits(
+        "git",
+        &[
+            "diff".to_owned(),
+            "--no-index".to_owned(),
+            "--binary".to_owned(),
+            "--src-prefix=a/".to_owned(),
+            "--dst-prefix=b/".to_owned(),
+            "old".to_owned(),
+            "new".to_owned(),
+        ],
+        Some(&scratch),
+        Duration::from_secs(5 * 60),
+        256 * 1024 * 1024,
+        &[0, 1],
+    )?;
 
-    let status = output.status.code().unwrap_or(1);
-    if status != 0 && status != 1 {
-        return Err(SyncError::GitDiffFailed {
-            status,
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        });
-    }
-
-    let raw_patch = String::from_utf8(output.stdout).map_err(|err| SyncError::PatchExport {
-        message: err.to_string(),
-    })?;
+    let raw_patch = output.stdout;
     let rewritten = rewrite_patch_headers(&raw_patch, Path::new("old"), Path::new("new"));
     fs::write(output_path, format!("{rewritten}\n")).map_err(|source| SyncError::Io {
         path: output_path.to_path_buf(),

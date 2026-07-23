@@ -138,7 +138,7 @@ Every mutating command supports `--json` for scripting. Most session-scoped comm
 Use when you want a throwaway VM with some seed files and no expectation of merging work back into a repo.
 
 - `launch --session <name>` clones the base VM and starts it.
-- `--seed <host-path>` copies a host directory into `~/sandbox/<session>` in the guest.
+- `--seed <host-path>` copies a filtered host directory into `~/sandbox/<session>` in the guest. Built-in build/cache exclusions apply, and an optional `.agbranchignore` uses gitignore syntax for project-specific exclusions. Symlinks that resolve outside the seed root are rejected.
 - `--agent {codex|claude|gemini}` bootstraps the provider inside the VM and attaches to its tmux window.
 - `export --from ~/sandbox/<session> --to <host-path>` pulls artifacts out before you close.
 - `close --discard --yes` destroys the VM. Sandbox sessions **cannot** close with `--sync` — that's enforced, not advisory.

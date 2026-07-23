@@ -99,6 +99,28 @@ pub(crate) fn run_with_catalog(
     )
 }
 
+pub(crate) fn run_with_catalog_silent(
+    args: SyncBackArgs,
+    host: &HostContext,
+    catalog: &rusqlite::Connection,
+    session_name: &SessionName,
+) -> Result<(), AppError> {
+    let runner = RealCommandRunner;
+    run_with_catalog_at_with(
+        SyncBackExecution {
+            args,
+            host,
+            catalog,
+            session_name,
+        },
+        SyncBackHooks {
+            runner: &runner,
+            now_fn: utc_now,
+            emit_outcome_fn: |_| Ok(()),
+        },
+    )
+}
+
 pub(crate) fn run_with_catalog_at_with<NowFn, EmitFn>(
     execution: SyncBackExecution<'_>,
     hooks: SyncBackHooks<'_, NowFn, EmitFn>,

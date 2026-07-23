@@ -219,7 +219,7 @@ fn resolve_uncached(host: &HostContext) -> Result<LimaAssetDir, AppError> {
     })
 }
 
-fn canonical_cache_dir(host: &HostContext) -> PathBuf {
+pub(crate) fn canonical_cache_dir(host: &HostContext) -> PathBuf {
     host.state_roots.assets.join(bundle_fingerprint_for_dirname(
         CURRENT_ASSET_BUNDLE_FINGERPRINT,
     ))

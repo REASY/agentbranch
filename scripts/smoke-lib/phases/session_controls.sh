@@ -79,6 +79,8 @@ phase_session_controls() {
   assert_json "${ARTIFACT_DIR}/session-controls-show-stopped.json" '.lifecycle_state == "stopped" and .runtime.vm.status == "stopped"'
 
   "${AGBRANCH_BIN}" start --session "${session}"
+  "${AGBRANCH_BIN}" run --session "${session}" -- sudo bash -lc \
+    'iptables -C AGBRANCH_OUTPUT_GUARD -d 10.0.0.0/8 -j REJECT && iptables -C AGBRANCH_FORWARD_GUARD -d 192.168.0.0/16 -j REJECT'
   capture_ps_json "${ARTIFACT_DIR}/session-controls-ps-restarted.json"
   assert_session_ps_state "${ARTIFACT_DIR}/session-controls-ps-restarted.json" "${session}" "running"
   capture_show_json "${session}" "${ARTIFACT_DIR}/session-controls-show-restarted.json"

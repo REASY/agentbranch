@@ -32,7 +32,14 @@ impl AppError {
             Self::Config(_) | Self::Validation(_) => 1,
             Self::Observability(_) | Self::NotImplemented(_) => 2,
             Self::Blocked(_) => 3,
-            Self::Interrupted => 4,
+            Self::Interrupted
+            | Self::Process(crate::error::process::ProcessError::Interrupted { .. })
+            | Self::Lima(crate::error::lima::LimaError::Process(
+                crate::error::process::ProcessError::Interrupted { .. },
+            ))
+            | Self::Sync(crate::error::sync::SyncError::Process(
+                crate::error::process::ProcessError::Interrupted { .. },
+            )) => 4,
             Self::Db(_) => 5,
             Self::Lima(_) => 6,
             Self::Process(_) => 7,
@@ -81,6 +88,22 @@ mod tests {
             AppError::Process(ProcessError::Failed { .. })
         ));
         assert_eq!(err.exit_code(), 7);
+    }
+
+    #[test]
+    fn interrupted_process_uses_interrupt_exit_code() {
+        let err: AppError = ProcessError::Interrupted {
+            program: "limactl".to_owned(),
+        }
+        .into();
+        assert_eq!(err.exit_code(), 4);
+
+        let lima_err: AppError =
+            crate::error::lima::LimaError::Process(ProcessError::Interrupted {
+                program: "limactl".to_owned(),
+            })
+            .into();
+        assert_eq!(lima_err.exit_code(), 4);
     }
 
     #[test]
