@@ -31,6 +31,25 @@ Commands print human output by default. `--json` enables machine-readable output
 
 For `launch --agent`, `open --agent`, and `agent start`, `--auth import` imports detected host credentials without prompting, `--auth none` skips imports, and `--auth ask` forces an interactive prompt when credentials are detected. The resulting import/none decision is remembered per provider in the state catalog. With no flag, the remembered choice is reused; if none exists, interactive commands prompt once and non-interactive commands import nothing.
 
+## Launch and open timings
+
+Each successful `launch` and `open` phase reports elapsed phase and total time with millisecond precision. Human output ends with an ordered phase breakdown, each phase's percentage of wall time, and the slowest phase. The `start-vm` measurement covers the complete `limactl start` call, including Lima waiting for the guest to become ready.
+
+With `--json`, the same data is returned as:
+
+```json
+{
+  "timings": {
+    "total_ms": 14250,
+    "phases": [
+      { "name": "clone-vm", "duration_ms": 1000 },
+      { "name": "start-vm", "duration_ms": 12000 }
+    ],
+    "slowest_phase": { "name": "start-vm", "duration_ms": 12000 }
+  }
+}
+```
+
 ## Exit codes
 
 `agbranch` returns one of the following codes on exit:

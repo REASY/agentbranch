@@ -7,11 +7,10 @@ use crate::error::AppError;
 use crate::lima::client::{LimaClient, LimactlClient};
 use crate::platform::host::HostContext;
 use crate::session::guest_support;
-use crate::session::orchestration::run_step;
+use crate::session::orchestration::{OperationTimings, run_step};
 use crate::session::state::transition_after_start;
 use crate::util::process::RealCommandRunner;
 use crate::util::time::utc_now;
-use std::time::Instant;
 
 pub fn run(args: SessionArgs) -> Result<(), AppError> {
     let (session_name_raw, session_name) = resolve_session_name(&args.session)?;
@@ -20,12 +19,12 @@ pub fn run(args: SessionArgs) -> Result<(), AppError> {
     let session = find_existing_session(&conn, &session_name, &session_name_raw)?;
     let runner = RealCommandRunner;
     let lima = LimactlClient::new(&runner);
-    let total_start = Instant::now();
-    run_step(&session_name, "start", "start-vm", &total_start, || {
+    let timings = OperationTimings::start();
+    run_step(&session_name, "start", "start-vm", &timings, || {
         Ok(lima.start_instance(&session.vm_name)?)
     })?;
     if let Some(tmux_socket) = session.guest_tmux_socket_path.as_ref() {
-        run_step(&session_name, "start", "ensure-shell", &total_start, || {
+        run_step(&session_name, "start", "ensure-shell", &timings, || {
             Ok(guest_support::ensure_workspace_and_shell(
                 &lima,
                 &session.vm_name,
@@ -35,7 +34,7 @@ pub fn run(args: SessionArgs) -> Result<(), AppError> {
             )?)
         })?;
     }
-    run_step(&session_name, "start", "update-state", &total_start, || {
+    run_step(&session_name, "start", "update-state", &timings, || {
         let now = utc_now();
         let started_at = if session.lifecycle_state == LifecycleState::Running {
             None

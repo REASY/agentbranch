@@ -16,7 +16,9 @@ use crate::lima::client::{LimaClient, LimactlClient};
 use crate::platform::host::HostContext;
 use crate::policy::artifacts::{ArtifactPolicy, FilteredSeedTree};
 use crate::session::guest_support;
-use crate::session::orchestration::{LockMetadataGuard, SessionGuard, run_step};
+use crate::session::orchestration::{
+    LockMetadataGuard, OperationTimings, SessionGuard, TimingSummary, run_step,
+};
 use crate::session::paths::{sandbox_workspace_path, tmux_socket_path};
 use crate::types::{GuestPath, HostPath, ProviderKind, SessionName};
 use crate::util::ids::{prepared_base_name, session_vm_name};
@@ -25,10 +27,24 @@ use crate::util::time::utc_now;
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::path::Path;
-use std::time::Instant;
 
 pub fn guest_sandbox_workspace(host_home_dir: &Path, session: &SessionName) -> GuestPath {
     sandbox_workspace_path(host_home_dir, session)
+}
+
+pub fn render_launch_json(
+    session: &SessionName,
+    vm_name: &crate::types::VmName,
+    workspace: &GuestPath,
+    timings: &TimingSummary,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&serde_json::json!({
+        "session": session,
+        "vm_name": vm_name,
+        "lifecycle_state": "running",
+        "guest_workspace_path": workspace,
+        "timings": timings,
+    }))
 }
 
 pub fn build_launch_record(
@@ -78,7 +94,7 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
 
     let runner = RealCommandRunner;
     let lima = LimactlClient::new(&runner);
-    let launch_started = Instant::now();
+    let timings = OperationTimings::start();
     let catalog = open_catalog(&host.state_roots.db)?;
     let vm_name = session_vm_name(&session_name);
     let workspace = guest_sandbox_workspace(&host.home_dir, &session_name);
@@ -114,24 +130,18 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
     let guard = SessionGuard::launch(&runner, &catalog, &session_name, &vm_name);
 
     let result: Result<(), AppError> = (|| {
-        let base_clone_lock = run_step(
-            &session_name,
-            "launch",
-            "prepare-base",
-            &launch_started,
-            || {
-                let mut on_notice =
-                    |notice| emit_prepared_base_notice(&catalog, &session_name, &notice);
-                acquire_clone_lock_for_prepared_base(
-                    &runner,
-                    &host,
-                    "launch clone",
-                    "launch prepare-base",
-                    &mut on_notice,
-                )
-            },
-        )?;
-        run_step(&session_name, "launch", "clone-vm", &launch_started, || {
+        let base_clone_lock = run_step(&session_name, "launch", "prepare-base", &timings, || {
+            let mut on_notice =
+                |notice| emit_prepared_base_notice(&catalog, &session_name, &notice);
+            acquire_clone_lock_for_prepared_base(
+                &runner,
+                &host,
+                "launch clone",
+                "launch prepare-base",
+                &mut on_notice,
+            )
+        })?;
+        run_step(&session_name, "launch", "clone-vm", &timings, || {
             Ok(lima.clone_instance(
                 &prepared_base_name(host.platform),
                 &vm_name,
@@ -141,14 +151,14 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
             )?)
         })?;
         drop(base_clone_lock);
-        run_step(&session_name, "launch", "start-vm", &launch_started, || {
+        run_step(&session_name, "launch", "start-vm", &timings, || {
             Ok(lima.start_instance(&vm_name)?)
         })?;
         run_step(
             &session_name,
             "launch",
             "install-guest-support",
-            &launch_started,
+            &timings,
             || {
                 Ok(guest_support::install_guest_support_files(
                     &lima,
@@ -158,40 +168,28 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
                 )?)
             },
         )?;
-        run_step(
-            &session_name,
-            "launch",
-            "ensure-shell",
-            &launch_started,
-            || {
-                Ok(guest_support::ensure_workspace_and_shell(
-                    &lima,
+        run_step(&session_name, "launch", "ensure-shell", &timings, || {
+            Ok(guest_support::ensure_workspace_and_shell(
+                &lima,
+                &vm_name,
+                &session_name,
+                record
+                    .guest_tmux_socket_path
+                    .as_ref()
+                    .expect("launch record should include tmux socket"),
+                &workspace,
+            )?)
+        })?;
+        if let Some(seed) = seed.as_ref() {
+            run_step(&session_name, "launch", "seed-workspace", &timings, || {
+                let policy = ArtifactPolicy::load(seed.as_path())?;
+                let filtered = FilteredSeedTree::materialize(seed.as_path(), &policy)?;
+                Ok(lima.copy_host_path_to_guest(
+                    &HostPath::new(filtered.path()),
                     &vm_name,
-                    &session_name,
-                    record
-                        .guest_tmux_socket_path
-                        .as_ref()
-                        .expect("launch record should include tmux socket"),
                     &workspace,
                 )?)
-            },
-        )?;
-        if let Some(seed) = seed.as_ref() {
-            run_step(
-                &session_name,
-                "launch",
-                "seed-workspace",
-                &launch_started,
-                || {
-                    let policy = ArtifactPolicy::load(seed.as_path())?;
-                    let filtered = FilteredSeedTree::materialize(seed.as_path(), &policy)?;
-                    Ok(lima.copy_host_path_to_guest(
-                        &HostPath::new(filtered.path()),
-                        &vm_name,
-                        &workspace,
-                    )?)
-                },
-            )?;
+            })?;
         }
         update_lifecycle_state_with_timestamps(
             &catalog,
@@ -203,27 +201,21 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
             None,
         )?;
         if let Some(provider) = provider {
-            let imported = run_step(
-                &session_name,
-                "launch",
-                "launch-agent",
-                &launch_started,
-                || {
-                    start_session_owned_agent_with(
-                        &lima,
-                        SessionOwnedAgentLaunch {
-                            session_name: &session_name,
-                            vm_name: &vm_name,
-                            workspace: &workspace,
-                            host_home: &host.home_dir,
-                            provider,
-                            shell_window_name: "shell",
-                            agent_window_name: "agent",
-                        },
-                        selected_auth.as_deref().unwrap_or_default(),
-                    )
-                },
-            )?;
+            let imported = run_step(&session_name, "launch", "launch-agent", &timings, || {
+                start_session_owned_agent_with(
+                    &lima,
+                    SessionOwnedAgentLaunch {
+                        session_name: &session_name,
+                        vm_name: &vm_name,
+                        workspace: &workspace,
+                        host_home: &host.home_dir,
+                        provider,
+                        shell_window_name: "shell",
+                        agent_window_name: "agent",
+                    },
+                    selected_auth.as_deref().unwrap_or_default(),
+                )
+            })?;
             let imported_json = serde_json::to_string(&imported).map_err(|err| {
                 AppError::Validation(ValidationError::StepFailed {
                     step: "launch-agent",
@@ -239,9 +231,7 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
                 &now,
             )?;
         }
-        run_step(&session_name, "launch", "finalize", &launch_started, || {
-            Ok(())
-        })?;
+        run_step(&session_name, "launch", "finalize", &timings, || Ok(()))?;
         Ok(())
     })();
 
@@ -251,24 +241,28 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
     }
 
     lock_guard.commit()?;
+    let timing_summary = timings.summary();
 
     if args.json {
         println!(
             "{}",
-            serde_json::json!({
-                "session": session_name,
-                "vm_name": vm_name,
-                "lifecycle_state": "running",
-                "guest_workspace_path": workspace,
-            })
+            render_launch_json(&session_name, &vm_name, &workspace, &timing_summary).map_err(
+                |err| AppError::Validation(ValidationError::StepFailed {
+                    step: "finalize",
+                    detail: format!("failed to serialize json output: {err}"),
+                })
+            )?
         );
-    } else if provider.is_some() {
-        crate::commands::attach::run(crate::cli::AttachArgs {
-            session: crate::cli::SessionSelector::from_session(args.session),
-            shell: false,
-            agent: true,
-            json: false,
-        })?;
+    } else {
+        eprintln!("{}", timing_summary.render_human("launch", &session_name));
+        if provider.is_some() {
+            crate::commands::attach::run(crate::cli::AttachArgs {
+                session: crate::cli::SessionSelector::from_session(args.session),
+                shell: false,
+                agent: true,
+                json: false,
+            })?;
+        }
     }
 
     Ok(())
@@ -278,6 +272,7 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use crate::db::models::SessionMode;
+    use crate::session::orchestration::{PhaseTiming, TimingSummary};
     use crate::types::{HostPath, ProviderKind, SessionName};
     use std::path::Path;
 
@@ -317,5 +312,30 @@ mod tests {
         assert_eq!(record.session_mode, SessionMode::Sandbox);
         assert_eq!(record.seed_host_path.as_ref(), Some(&seed));
         assert_eq!(record.host_context_path, None);
+    }
+
+    #[test]
+    fn launch_json_contains_structured_timings() {
+        let session = SessionName::try_from("research").expect("session");
+        let vm_name = crate::types::VmName::new("agbranch-research");
+        let workspace = GuestPath::new("/home/tester.guest/sandbox/research");
+        let timings = TimingSummary {
+            total_ms: 14_250,
+            phases: vec![PhaseTiming {
+                name: "start-vm".to_owned(),
+                duration_ms: 12_000,
+            }],
+            slowest_phase: Some(PhaseTiming {
+                name: "start-vm".to_owned(),
+                duration_ms: 12_000,
+            }),
+        };
+
+        let rendered = render_launch_json(&session, &vm_name, &workspace, &timings).expect("json");
+        let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid json");
+        assert_eq!(value["session"], "research");
+        assert_eq!(value["timings"]["total_ms"], 14_250);
+        assert_eq!(value["timings"]["phases"][0]["duration_ms"], 12_000);
+        assert_eq!(value["timings"]["slowest_phase"]["name"], "start-vm");
     }
 }

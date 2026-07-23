@@ -4,21 +4,96 @@ use crate::git::session_refs::delete_ref_if_exists;
 use crate::lima::instance;
 use crate::types::{SessionName, VmName};
 use crate::util::process::RealCommandRunner;
+use serde::Serialize;
+use std::cell::RefCell;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PhaseTiming {
+    pub name: String,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TimingSummary {
+    pub total_ms: u64,
+    pub phases: Vec<PhaseTiming>,
+    pub slowest_phase: Option<PhaseTiming>,
+}
+
+impl TimingSummary {
+    pub fn render_human(&self, operation: &str, session: &SessionName) -> String {
+        let mut lines = vec![format!(
+            "{operation} {session}: completed in {}",
+            format_milliseconds(self.total_ms)
+        )];
+        for phase in &self.phases {
+            lines.push(format!(
+                "  {:<24} {:>9} {:>5.1}%",
+                phase.name,
+                format_milliseconds(phase.duration_ms),
+                percentage(phase.duration_ms, self.total_ms),
+            ));
+        }
+        if let Some(slowest) = &self.slowest_phase {
+            lines.push(format!(
+                "  slowest: {} {} ({:.1}%)",
+                slowest.name,
+                format_milliseconds(slowest.duration_ms),
+                percentage(slowest.duration_ms, self.total_ms),
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
+pub struct OperationTimings {
+    started: Instant,
+    phases: RefCell<Vec<PhaseTiming>>,
+}
+
+impl OperationTimings {
+    pub fn start() -> Self {
+        Self {
+            started: Instant::now(),
+            phases: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn record(&self, name: &'static str, duration: Duration) {
+        self.phases.borrow_mut().push(PhaseTiming {
+            name: name.to_owned(),
+            duration_ms: duration_milliseconds(duration),
+        });
+    }
+
+    pub fn summary(&self) -> TimingSummary {
+        let phases = self.phases.borrow().clone();
+        let slowest_phase = phases.iter().max_by_key(|phase| phase.duration_ms).cloned();
+        TimingSummary {
+            total_ms: duration_milliseconds(self.started.elapsed()),
+            phases,
+            slowest_phase,
+        }
+    }
+}
 
 pub fn run_step<T, F>(
     session: &SessionName,
     operation: &'static str,
     step_name: &'static str,
-    total_start: &Instant,
+    timings: &OperationTimings,
     f: F,
 ) -> Result<T, AppError>
 where
     F: FnOnce() -> Result<T, AppError>,
 {
     let phase_start = Instant::now();
-    let result = f().map_err(|err| match err {
+    let result = f();
+    let phase_duration = phase_start.elapsed();
+    timings.record(step_name, phase_duration);
+    let result = result.map_err(|err| match err {
         AppError::Blocked(_) | AppError::Interrupted => err,
         other => AppError::Validation(ValidationError::StepFailed {
             step: step_name,
@@ -26,11 +101,31 @@ where
         }),
     })?;
     eprintln!(
-        "{operation} {session}: {step_name} (phase {}s, total {}s)",
-        phase_start.elapsed().as_secs(),
-        total_start.elapsed().as_secs(),
+        "{operation} {session}: {step_name} (phase {}, total {})",
+        format_duration(phase_duration),
+        format_duration(timings.started.elapsed()),
     );
     Ok(result)
+}
+
+fn duration_milliseconds(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn format_duration(duration: Duration) -> String {
+    format_milliseconds(duration_milliseconds(duration))
+}
+
+fn format_milliseconds(milliseconds: u64) -> String {
+    format!("{}.{:03}s", milliseconds / 1_000, milliseconds % 1_000)
+}
+
+fn percentage(duration_ms: u64, total_ms: u64) -> f64 {
+    if total_ms == 0 {
+        0.0
+    } else {
+        duration_ms as f64 * 100.0 / total_ms as f64
+    }
 }
 
 pub struct SessionGuard<'a> {
@@ -173,18 +268,19 @@ mod tests {
     #[test]
     fn run_step_returns_ok_on_success() {
         let session = SessionName::try_from("demo").expect("session");
-        let total_start = Instant::now();
+        let timings = OperationTimings::start();
         let result: Result<i32, AppError> =
-            run_step(&session, "launch", "clone-vm", &total_start, || Ok(42));
+            run_step(&session, "launch", "clone-vm", &timings, || Ok(42));
         assert_eq!(result.expect("ok value"), 42);
+        assert_eq!(timings.summary().phases[0].name, "clone-vm");
     }
 
     #[test]
     fn run_step_wraps_inner_error_as_step_failed() {
         let session = SessionName::try_from("demo").expect("session");
-        let total_start = Instant::now();
+        let timings = OperationTimings::start();
         let result: Result<(), AppError> =
-            run_step(&session, "launch", "clone-vm", &total_start, || {
+            run_step(&session, "launch", "clone-vm", &timings, || {
                 Err(AppError::Validation(ValidationError::UnsupportedHost))
             });
         let err = result.expect_err("should fail");
@@ -203,9 +299,9 @@ mod tests {
     #[test]
     fn run_step_preserves_blocked_errors() {
         let session = SessionName::try_from("demo").expect("session");
-        let total_start = Instant::now();
+        let timings = OperationTimings::start();
         let result: Result<(), AppError> =
-            run_step(&session, "launch", "clone-vm", &total_start, || {
+            run_step(&session, "launch", "clone-vm", &timings, || {
                 Err(AppError::Blocked("base is busy".to_owned()))
             });
 
@@ -213,6 +309,55 @@ mod tests {
             result.expect_err("should fail"),
             AppError::Blocked(message) if message == "base is busy"
         ));
+    }
+
+    #[test]
+    fn timing_summary_renders_milliseconds_percentages_and_slowest_phase() {
+        let session = SessionName::try_from("demo").expect("session");
+        let summary = TimingSummary {
+            total_ms: 14_000,
+            phases: vec![
+                PhaseTiming {
+                    name: "clone-vm".to_owned(),
+                    duration_ms: 1_000,
+                },
+                PhaseTiming {
+                    name: "start-vm".to_owned(),
+                    duration_ms: 12_500,
+                },
+            ],
+            slowest_phase: Some(PhaseTiming {
+                name: "start-vm".to_owned(),
+                duration_ms: 12_500,
+            }),
+        };
+
+        let rendered = summary.render_human("launch", &session);
+        assert!(rendered.contains("completed in 14.000s"));
+        assert!(rendered.contains("clone-vm"));
+        assert!(rendered.contains("7.1%"));
+        assert!(rendered.contains("slowest: start-vm 12.500s (89.3%)"));
+    }
+
+    #[test]
+    fn timing_summary_serializes_structured_milliseconds() {
+        let summary = TimingSummary {
+            total_ms: 1_250,
+            phases: vec![PhaseTiming {
+                name: "start-vm".to_owned(),
+                duration_ms: 1_000,
+            }],
+            slowest_phase: Some(PhaseTiming {
+                name: "start-vm".to_owned(),
+                duration_ms: 1_000,
+            }),
+        };
+
+        let value = serde_json::to_value(summary).expect("serialize timings");
+        assert_eq!(value["total_ms"], 1_250);
+        assert_eq!(value["phases"][0]["name"], "start-vm");
+        assert_eq!(value["phases"][0]["duration_ms"], 1_000);
+        assert_eq!(value["slowest_phase"]["name"], "start-vm");
     }
 
     fn seed_session(conn: &rusqlite::Connection, session: &SessionName, vm: &VmName) {

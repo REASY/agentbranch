@@ -127,6 +127,8 @@ agbranch close feature-x --sync --yes
 
 Every mutating command supports `--json` for scripting. Most session-scoped commands accept either the `SESSION` positional or `--session <name>`; `launch` and `open` require `--session`, and `watch` uses `--session` only.
 
+`launch` and `open` report each phase with millisecond precision, then print a completion breakdown with percentages and the slowest phase. Their JSON result includes the same measurements under `timings`, with `total_ms`, an ordered `phases` array, and `slowest_phase`.
+
 ---
 
 ## The two workflows

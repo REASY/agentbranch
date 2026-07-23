@@ -22,7 +22,9 @@ use crate::lima::client::{LimaClient, LimactlClient};
 use crate::lima::shell;
 use crate::platform::host::HostContext;
 use crate::session::guest_support;
-use crate::session::orchestration::{LockMetadataGuard, SessionGuard, run_step};
+use crate::session::orchestration::{
+    LockMetadataGuard, OperationTimings, SessionGuard, TimingSummary, run_step,
+};
 use crate::session::paths::{repo_workspace_path, tmux_socket_path};
 use crate::session::state::transition_after_open;
 use crate::types::{GuestPath, HostPath, ProviderKind, SessionName};
@@ -33,7 +35,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::IsTerminal;
 use std::path::Path;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn render_open_json(
     session: &SessionName,
@@ -41,6 +43,7 @@ pub fn render_open_json(
     lifecycle_state: crate::db::models::LifecycleState,
     repo_host_path: &HostPath,
     repo_guest_path: &GuestPath,
+    timings: &TimingSummary,
 ) -> Result<String, serde_json::Error> {
     serde_json::to_string(&serde_json::json!({
         "session": session,
@@ -48,6 +51,7 @@ pub fn render_open_json(
         "lifecycle_state": crate::db::models::lifecycle_state_name(lifecycle_state),
         "repo_host_path": repo_host_path,
         "repo_guest_path": repo_guest_path,
+        "timings": timings,
     }))
 }
 
@@ -69,12 +73,12 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
 
     let runner = RealCommandRunner;
     let lima = LimactlClient::new(&runner);
-    let open_started = Instant::now();
+    let timings = OperationTimings::start();
     let baseline = run_step(
         &session_name,
         "open",
         "capture-repo-baseline",
-        &open_started,
+        &timings,
         || Ok(capture_repo_baseline(&runner, &args.repo)?),
     )?;
     if baseline.head_oid.is_none() {
@@ -82,7 +86,7 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
     }
 
     let (git_root, resolved_base_ref, base_oid, review_branch, hidden_refs, identity) =
-        run_step(&session_name, "open", "resolve-base", &open_started, || {
+        run_step(&session_name, "open", "resolve-base", &timings, || {
             let git_root = resolve_git_root(&runner, &args.repo)?;
             let resolved_base_ref = resolve_base_ref(
                 args.base.as_deref(),
@@ -193,7 +197,7 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
         &session_name,
         "open",
         "initialize-session-refs",
-        &open_started,
+        &timings,
         || {
             Ok(initialize_session_refs(
                 &runner,
@@ -216,34 +220,27 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
     );
 
     let result: Result<(), AppError> = (|| {
-        let seed_clone = run_step(
-            &session_name,
-            "open",
-            "seed-repo-clone",
-            &open_started,
-            || {
-                create_git_seed_clone(
-                    &runner,
-                    &host.state_roots.staging,
-                    &git_root,
-                    &resolved_base_ref,
-                    &review_branch,
-                )
-            },
-        )?;
-        let base_clone_lock =
-            run_step(&session_name, "open", "prepare-base", &open_started, || {
-                let mut on_notice =
-                    |notice| emit_prepared_base_notice(&catalog, &session_name, &notice);
-                acquire_clone_lock_for_prepared_base(
-                    &runner,
-                    &host,
-                    "open clone",
-                    "open prepare-base",
-                    &mut on_notice,
-                )
-            })?;
-        run_step(&session_name, "open", "clone-vm", &open_started, || {
+        let seed_clone = run_step(&session_name, "open", "seed-repo-clone", &timings, || {
+            create_git_seed_clone(
+                &runner,
+                &host.state_roots.staging,
+                &git_root,
+                &resolved_base_ref,
+                &review_branch,
+            )
+        })?;
+        let base_clone_lock = run_step(&session_name, "open", "prepare-base", &timings, || {
+            let mut on_notice =
+                |notice| emit_prepared_base_notice(&catalog, &session_name, &notice);
+            acquire_clone_lock_for_prepared_base(
+                &runner,
+                &host,
+                "open clone",
+                "open prepare-base",
+                &mut on_notice,
+            )
+        })?;
+        run_step(&session_name, "open", "clone-vm", &timings, || {
             Ok(lima.clone_instance(
                 &prepared_base_name(host.platform),
                 &vm_name,
@@ -253,14 +250,14 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
             )?)
         })?;
         drop(base_clone_lock);
-        run_step(&session_name, "open", "start-vm", &open_started, || {
+        run_step(&session_name, "open", "start-vm", &timings, || {
             Ok(lima.start_instance(&vm_name)?)
         })?;
         run_step(
             &session_name,
             "open",
             "install-guest-support",
-            &open_started,
+            &timings,
             || {
                 Ok(guest_support::install_guest_support_files(
                     &lima,
@@ -270,10 +267,10 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
                 )?)
             },
         )?;
-        run_step(&session_name, "open", "seed-repo", &open_started, || {
+        run_step(&session_name, "open", "seed-repo", &timings, || {
             Ok(lima.seed_repo(seed_clone.path(), &vm_name, &guest_repo)?)
         })?;
-        run_step(&session_name, "open", "ensure-shell", &open_started, || {
+        run_step(&session_name, "open", "ensure-shell", &timings, || {
             Ok(guest_support::ensure_workspace_and_shell(
                 &lima,
                 &vm_name,
@@ -286,11 +283,11 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
             &session_name,
             "open",
             "configure-git-identity",
-            &open_started,
+            &timings,
             || configure_guest_identity(&runner, &vm_name, &guest_repo, &identity),
         )?;
         if let Some(provider) = provider {
-            let imported = run_step(&session_name, "open", "launch-agent", &open_started, || {
+            let imported = run_step(&session_name, "open", "launch-agent", &timings, || {
                 start_session_owned_agent_with(
                     &lima,
                     SessionOwnedAgentLaunch {
@@ -321,7 +318,7 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
             )?;
         }
 
-        run_step(&session_name, "open", "finalize", &open_started, || {
+        run_step(&session_name, "open", "finalize", &timings, || {
             Ok(update_lifecycle_state_with_timestamps(
                 &catalog,
                 &session_name,
@@ -341,6 +338,7 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
     }
 
     lock_guard.commit()?;
+    let timing_summary = timings.summary();
 
     if args.json {
         println!(
@@ -351,19 +349,23 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
                 transition_after_open(),
                 &host_repo,
                 &guest_repo,
+                &timing_summary,
             )
             .map_err(|err| AppError::Validation(ValidationError::StepFailed {
                 step: "finalize",
                 detail: format!("failed to serialize json output: {err}"),
             }))?
         );
-    } else if provider.is_some() {
-        crate::commands::attach::run(crate::cli::AttachArgs {
-            session: crate::cli::SessionSelector::from_session(args.session),
-            shell: false,
-            agent: true,
-            json: false,
-        })?;
+    } else {
+        eprintln!("{}", timing_summary.render_human("open", &session_name));
+        if provider.is_some() {
+            crate::commands::attach::run(crate::cli::AttachArgs {
+                session: crate::cli::SessionSelector::from_session(args.session),
+                shell: false,
+                agent: true,
+                json: false,
+            })?;
+        }
     }
 
     Ok(())
@@ -533,6 +535,7 @@ mod tests {
     use super::*;
     use super::{guest_repo_path, render_open_repo_progress};
     use crate::db::models::LifecycleState;
+    use crate::session::orchestration::{PhaseTiming, TimingSummary};
     use crate::session::paths::tmux_socket_path;
     use crate::types::{SessionName, VmName};
     use std::path::{Path, PathBuf};
@@ -583,6 +586,17 @@ mod tests {
             &GuestPath::new(PathBuf::from(
                 "/home/agbranch.guest/workspaces/agbranch-smoke-happy/repo",
             )),
+            &TimingSummary {
+                total_ms: 14_250,
+                phases: vec![PhaseTiming {
+                    name: "start-vm".to_owned(),
+                    duration_ms: 12_000,
+                }],
+                slowest_phase: Some(PhaseTiming {
+                    name: "start-vm".to_owned(),
+                    duration_ms: 12_000,
+                }),
+            },
         )
         .expect("open json");
 
@@ -590,5 +604,7 @@ mod tests {
         assert_eq!(value["session"], "agbranch-smoke-happy");
         assert_eq!(value["vm_name"], "agbranch-smoke-happy");
         assert_eq!(value["lifecycle_state"], "running");
+        assert_eq!(value["timings"]["total_ms"], 14_250);
+        assert_eq!(value["timings"]["slowest_phase"]["name"], "start-vm");
     }
 }

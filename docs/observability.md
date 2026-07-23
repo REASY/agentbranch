@@ -9,6 +9,7 @@ Everything a session does is observable from outside the VM.
 - **`watch --json`** — ndjson stream of snapshots + events; tails state transitions in real time.
 - **`doctor --json`** — `{ ok, platform, lima_version, state_root, prepared_base, ... }` for health checks.
 - **`repair`** — reads the session's lifecycle state and picks a deterministic recovery action (no-op, restart, finish-destroy); returns `Blocked` when manual intervention is required.
+- **Launch timings** — `launch` and `open` expose ordered phase durations, total wall time, and the slowest phase in human and JSON output.
 
 ## State directory
 
