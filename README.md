@@ -8,14 +8,14 @@
 
 ## At a glance
 
-|                  |                                                                              |
-|------------------|------------------------------------------------------------------------------|
-| **Version**      | `0.1.0` (under active development)                                           |
-| **Platforms**    | macOS 13+ (Lima `vmType: vz` with Rosetta), Linux with QEMU + `/dev/kvm`     |
-| **Runtime**      | Lima `2.1.0+`                                                                |
-| **Build toolchain** | Rust `1.95.0` (pinned via `rust-toolchain.toml`)                          |
-| **Agents**       | Codex, Claude Code, Gemini (installed inside the prepared base)              |
-| **Distribution** | Source build / `cargo install --git` — no crates.io or pre-built release yet |
+|                     |                                                                              |
+|---------------------|------------------------------------------------------------------------------|
+| **Version**         | `0.1.1` (under active development)                                           |
+| **Platforms**       | macOS 13+ (Lima `vmType: vz` with Rosetta), Linux with QEMU + `/dev/kvm`     |
+| **Runtime**         | Lima `2.1.0+`                                                                |
+| **Build toolchain** | Rust `1.97.1` (pinned via `rust-toolchain.toml`)                             |
+| **Agents**          | Codex, Claude Code, Gemini (installed inside the prepared base)              |
+| **Distribution**    | Source build / `cargo install --git` — no crates.io or pre-built release yet |
 
 ---
 
