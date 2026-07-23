@@ -24,6 +24,8 @@ pub enum Command {
     Export(ExportArgs),
     Attach(AttachArgs),
     Agent(AgentArgs),
+    /// Inspect or change remembered credential-import policies.
+    Auth(AuthArgs),
     Kill(KillArgs),
     Ps(ListArgs),
     Show(SessionArgs),
@@ -196,6 +198,42 @@ pub struct AgentArgs {
 pub enum AgentAction {
     Start(AgentStartArgs),
     Stop(AgentStopArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AuthArgs {
+    #[command(subcommand)]
+    pub action: AuthAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuthAction {
+    /// Show the remembered policy for every supported provider.
+    List(JsonFlag),
+    /// Set a provider's non-interactive credential-import policy.
+    Set(AuthSetArgs),
+    /// Forget one provider's policy, or all remembered policies.
+    Reset(AuthResetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AuthSetArgs {
+    #[arg(value_enum)]
+    pub provider: ProviderArg,
+    #[arg(value_enum)]
+    pub policy: AuthPreferencePolicy,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AuthResetArgs {
+    #[arg(value_enum, required_unless_present = "all", conflicts_with = "all")]
+    pub provider: Option<ProviderArg>,
+    #[arg(long)]
+    pub all: bool,
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -404,6 +442,35 @@ pub enum AuthMode {
     Ask,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ProviderArg {
+    Codex,
+    Claude,
+    Gemini,
+}
+
+impl From<ProviderArg> for crate::types::ProviderKind {
+    fn from(value: ProviderArg) -> Self {
+        match value {
+            ProviderArg::Codex => Self::Codex,
+            ProviderArg::Claude => Self::Claude,
+            ProviderArg::Gemini => Self::Gemini,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AuthPreferencePolicy {
+    Import,
+    None,
+}
+
+impl AuthPreferencePolicy {
+    pub fn import(self) -> bool {
+        matches!(self, Self::Import)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,5 +670,51 @@ mod tests {
             panic!("expected agent start command");
         };
         assert_eq!(args.auth, Some(AuthMode::Ask));
+    }
+
+    #[test]
+    fn auth_management_parses_list_set_and_reset() {
+        let cli = Cli::parse_from(["agbranch", "auth", "list", "--json"]);
+        let Command::Auth(args) = cli.command else {
+            panic!("expected auth");
+        };
+        let AuthAction::List(args) = args.action else {
+            panic!("expected list");
+        };
+        assert!(args.json);
+
+        let cli = Cli::parse_from(["agbranch", "auth", "set", "codex", "import"]);
+        let Command::Auth(args) = cli.command else {
+            panic!("expected auth");
+        };
+        let AuthAction::Set(args) = args.action else {
+            panic!("expected set");
+        };
+        assert_eq!(args.provider, ProviderArg::Codex);
+        assert_eq!(args.policy, AuthPreferencePolicy::Import);
+
+        let cli = Cli::parse_from(["agbranch", "auth", "reset", "--all"]);
+        let Command::Auth(args) = cli.command else {
+            panic!("expected auth");
+        };
+        let AuthAction::Reset(args) = args.action else {
+            panic!("expected reset");
+        };
+        assert!(args.all);
+        assert_eq!(args.provider, None);
+    }
+
+    #[test]
+    fn auth_reset_requires_exactly_one_scope() {
+        let missing = Cli::try_parse_from(["agbranch", "auth", "reset"])
+            .expect_err("reset needs a provider or --all");
+        assert_eq!(
+            missing.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let conflict = Cli::try_parse_from(["agbranch", "auth", "reset", "codex", "--all"])
+            .expect_err("provider conflicts with --all");
+        assert_eq!(conflict.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

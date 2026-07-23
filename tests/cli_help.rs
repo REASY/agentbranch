@@ -8,6 +8,7 @@ fn help_lists_the_expected_subcommands() {
         predicate::str::contains("base")
             .and(predicate::str::contains("prepare").not())
             .and(predicate::str::contains("open"))
+            .and(predicate::str::contains("auth"))
             .and(predicate::str::contains("ps"))
             .and(predicate::str::contains("show"))
             .and(predicate::str::contains("start"))

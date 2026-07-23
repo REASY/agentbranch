@@ -21,6 +21,7 @@ Every `agbranch` subcommand, grouped by what you're trying to do. For full flag 
 |               | `run`                    | Execute a one-shot command in the guest (`--` separates the command).                        |
 | **Providers** | `agent start --provider` | Bootstrap a provider in an existing session; supports `--auth import\|none\|ask`.            |
 |               | `agent stop`             | Stop the session's agent window.                                                             |
+|               | `auth list\|set\|reset`  | Inspect, set, or forget remembered provider credential-import policies.                      |
 |               | `kill`                   | Force-stop the agent (and optionally the VM with `--force`).                                 |
 | **VM power**  | `start` / `stop`         | Power the session VM on or off without closing the session.                                  |
 | **Finish**    | `sync-back`              | Repo sessions: bundle guest HEAD back to the host review branch.                             |
@@ -32,6 +33,8 @@ Every `agbranch` subcommand, grouped by what you're trying to do. For full flag 
 Commands print human output by default. `--json` enables machine-readable output where supported; streaming commands may emit line-delimited JSON instead of a single document. Most session-scoped commands accept either the `SESSION` positional or `--session <name>`; `launch` and `open` require `--session`, and `watch` uses `--session` only.
 
 For `launch --agent`, `open --agent`, and `agent start`, `--auth import` imports detected host credentials without prompting, `--auth none` skips imports, and `--auth ask` forces an interactive prompt when credentials are detected. The resulting import/none decision is remembered per provider in the state catalog. With no flag, the remembered choice is reused; if none exists, interactive commands prompt once and non-interactive commands import nothing.
+
+Use `auth list [--json]` to inspect all three providers, `auth set PROVIDER import|none` to preconfigure automation, `auth reset PROVIDER` to restore prompt-on-first-interactive-use behavior for one provider, or `auth reset --all` to clear every remembered decision.
 
 `launch` and `open` accept repeatable `--publish` mappings. `--publish 3000` maps host localhost port 3000 to guest port 3000; `--publish 8080:3000` maps a different host port; append `/udp` for UDP. Published ports never bind to non-loopback host addresses. Use `agbranch ports SESSION [--json]` to inspect configured endpoints and live guest listener state.
 

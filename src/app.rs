@@ -1,7 +1,7 @@
 use crate::cli::{Cli, Command};
 use crate::commands::{
-    agent, attach, base, close, doctor, export, gc, internal, kill, launch, logs, open, ports, ps,
-    repair, retry, run, shell, show, ssh, start, stop, sync_back, watch,
+    agent, attach, auth, base, close, doctor, export, gc, internal, kill, launch, logs, open,
+    ports, ps, repair, retry, run, shell, show, ssh, start, stop, sync_back, watch,
 };
 use crate::error::AppError;
 
@@ -13,6 +13,7 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
         Command::Export(args) => export::run(args),
         Command::Attach(args) => attach::run(args),
         Command::Agent(args) => agent::run(args),
+        Command::Auth(args) => auth::run(args),
         Command::Kill(args) => kill::run(args),
         Command::Ps(args) => ps::run(args),
         Command::Show(args) => show::run(args),

@@ -178,6 +178,15 @@ Coding agents aren't installed on your host — they're installed in the prepare
 
 Use `--auth import` to import detected credentials without a prompt, `--auth none` to start without importing them, or `--auth ask` to force a fresh prompt when credentials are detected. The choice is remembered independently for Codex, Claude, and Gemini; omitting `--auth` reuses that choice, or prompts once in an interactive terminal when no choice exists. Non-interactive launches with no remembered choice default to no import. Auth is resolved before the VM is cloned or started, so an interactive launch does not pause after boot.
 
+Inspect or manage those remembered choices directly:
+
+```sh
+agbranch auth list
+agbranch auth set codex import
+agbranch auth reset codex
+agbranch auth reset --all
+```
+
 Session-owned providers run inside the VM with permissive defaults. The VM boundary protects the host, not any credentials imported into the guest.
 
 The readiness probe for the prepared base verifies `codex --version`, `claude --version`, `gemini --version`, Node `>= 20`, `tmux`, and `docker compose version` — so if `base prepare` completes, the runtime prerequisites for the supported agent CLIs are in place.

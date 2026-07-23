@@ -29,6 +29,19 @@ pub fn remember_auth_import(
     Ok(())
 }
 
+pub fn forget_auth_import(conn: &Connection, provider: ProviderKind) -> Result<bool, DbError> {
+    let deleted = conn.execute(
+        "DELETE FROM provider_preferences WHERE provider = ?1",
+        params![provider.as_str()],
+    )?;
+    Ok(deleted > 0)
+}
+
+pub fn clear_auth_imports(conn: &Connection) -> Result<usize, DbError> {
+    conn.execute("DELETE FROM provider_preferences", [])
+        .map_err(DbError::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,6 +72,26 @@ mod tests {
         assert_eq!(
             remembered_auth_import(&conn, ProviderKind::Codex).expect("lookup"),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn forgets_one_or_all_auth_choices() {
+        let dir = tempdir().expect("tempdir");
+        let conn = open_catalog(&dir.path().join("state.db")).expect("catalog");
+        remember_auth_import(&conn, ProviderKind::Codex, true).expect("codex");
+        remember_auth_import(&conn, ProviderKind::Claude, false).expect("claude");
+
+        assert!(forget_auth_import(&conn, ProviderKind::Codex).expect("forget codex"));
+        assert!(!forget_auth_import(&conn, ProviderKind::Codex).expect("forget missing"));
+        assert_eq!(
+            remembered_auth_import(&conn, ProviderKind::Codex).expect("lookup codex"),
+            None
+        );
+        assert_eq!(clear_auth_imports(&conn).expect("clear"), 1);
+        assert_eq!(
+            remembered_auth_import(&conn, ProviderKind::Claude).expect("lookup claude"),
+            None
         );
     }
 }
