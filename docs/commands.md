@@ -33,7 +33,7 @@ For `launch --agent`, `open --agent`, and `agent start`, `--auth import` imports
 
 ## Launch and open timings
 
-Each successful `launch` and `open` phase reports elapsed phase and total time with millisecond precision. Human output ends with an ordered phase breakdown, each phase's percentage of wall time, and the slowest phase. The `start-vm` measurement covers the complete `limactl start` call, including Lima waiting for the guest to become ready.
+Each `launch` and `open` phase is announced immediately, then reports elapsed phase and total time with millisecond precision when it completes. Human output ends with an ordered phase breakdown, each phase's percentage of wall time, and the slowest phase. The `start-vm` measurement covers the complete `limactl start` call, including Lima waiting for the guest to become ready.
 
 With `--json`, the same data is returned as:
 

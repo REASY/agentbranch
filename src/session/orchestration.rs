@@ -89,6 +89,10 @@ pub fn run_step<T, F>(
 where
     F: FnOnce() -> Result<T, AppError>,
 {
+    eprintln!(
+        "{}",
+        render_step_started(operation, session, step_name, timings.started.elapsed())
+    );
     let phase_start = Instant::now();
     let result = f();
     let phase_duration = phase_start.elapsed();
@@ -101,11 +105,42 @@ where
         }),
     })?;
     eprintln!(
-        "{operation} {session}: {step_name} (phase {}, total {})",
-        format_duration(phase_duration),
-        format_duration(timings.started.elapsed()),
+        "{}",
+        render_step_completed(
+            operation,
+            session,
+            step_name,
+            phase_duration,
+            timings.started.elapsed(),
+        )
     );
     Ok(result)
+}
+
+fn render_step_started(
+    operation: &str,
+    session: &SessionName,
+    step_name: &str,
+    total: Duration,
+) -> String {
+    format!(
+        "{operation} {session}: {step_name} (started, total {})",
+        format_duration(total)
+    )
+}
+
+fn render_step_completed(
+    operation: &str,
+    session: &SessionName,
+    step_name: &str,
+    phase: Duration,
+    total: Duration,
+) -> String {
+    format!(
+        "{operation} {session}: {step_name} (phase {}, total {})",
+        format_duration(phase),
+        format_duration(total)
+    )
 }
 
 fn duration_milliseconds(duration: Duration) -> u64 {
@@ -358,6 +393,25 @@ mod tests {
         assert_eq!(value["phases"][0]["name"], "start-vm");
         assert_eq!(value["phases"][0]["duration_ms"], 1_000);
         assert_eq!(value["slowest_phase"]["name"], "start-vm");
+    }
+
+    #[test]
+    fn phase_progress_has_distinct_started_and_completed_lines() {
+        let session = SessionName::try_from("demo").expect("session");
+        assert_eq!(
+            render_step_started("launch", &session, "start-vm", Duration::from_millis(1_960),),
+            "launch demo: start-vm (started, total 1.960s)"
+        );
+        assert_eq!(
+            render_step_completed(
+                "launch",
+                &session,
+                "start-vm",
+                Duration::from_millis(17_060),
+                Duration::from_millis(19_020),
+            ),
+            "launch demo: start-vm (phase 17.060s, total 19.020s)"
+        );
     }
 
     fn seed_session(conn: &rusqlite::Connection, session: &SessionName, vm: &VmName) {
