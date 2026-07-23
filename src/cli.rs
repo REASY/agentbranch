@@ -102,6 +102,10 @@ pub struct LaunchArgs {
     pub seed: Option<PathBuf>,
     #[arg(long, value_parser = ["codex", "claude", "gemini"])]
     pub agent: Option<String>,
+    /// Control host auth import. Omit to reuse the provider's remembered choice,
+    /// prompting once when no choice exists.
+    #[arg(long, value_enum, requires = "agent")]
+    pub auth: Option<AuthMode>,
     #[arg(long)]
     pub cpus: Option<u16>,
     #[arg(long)]
@@ -122,6 +126,10 @@ pub struct OpenArgs {
     pub base: Option<String>,
     #[arg(long, value_parser = ["codex", "claude", "gemini"])]
     pub agent: Option<String>,
+    /// Control host auth import. Omit to reuse the provider's remembered choice,
+    /// prompting once when no choice exists.
+    #[arg(long, value_enum, requires = "agent")]
+    pub auth: Option<AuthMode>,
     #[arg(long)]
     pub cpus: Option<u16>,
     #[arg(long)]
@@ -176,6 +184,10 @@ pub struct AgentStartArgs {
     pub session: SessionSelector,
     #[arg(long, value_parser = ["codex", "claude", "gemini"])]
     pub provider: String,
+    /// Control host auth import. Omit to reuse the provider's remembered choice,
+    /// prompting once when no choice exists.
+    #[arg(long, value_enum)]
+    pub auth: Option<AuthMode>,
     #[arg(long)]
     pub json: bool,
 }
@@ -357,6 +369,13 @@ pub enum LogSource {
     Kernel,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AuthMode {
+    Import,
+    None,
+    Ask,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,5 +443,76 @@ mod tests {
         let err = Cli::try_parse_from(["agbranch", "prepare"]).expect_err("prepare is removed");
 
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn launch_accepts_explicit_auth_modes() {
+        for (raw, expected) in [
+            ("import", AuthMode::Import),
+            ("none", AuthMode::None),
+            ("ask", AuthMode::Ask),
+        ] {
+            let cli = Cli::parse_from([
+                "agbranch",
+                "launch",
+                "--session",
+                "demo",
+                "--agent",
+                "codex",
+                "--auth",
+                raw,
+            ]);
+            let Command::Launch(args) = cli.command else {
+                panic!("expected launch command");
+            };
+            assert_eq!(args.auth, Some(expected));
+        }
+    }
+
+    #[test]
+    fn launch_auth_requires_an_agent() {
+        let err =
+            Cli::try_parse_from(["agbranch", "launch", "--session", "demo", "--auth", "none"])
+                .expect_err("auth without an agent should be rejected");
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn open_and_agent_start_accept_auth_policy() {
+        let cli = Cli::parse_from([
+            "agbranch",
+            "open",
+            "--session",
+            "demo",
+            "--repo",
+            ".",
+            "--agent",
+            "claude",
+            "--auth",
+            "none",
+        ]);
+        let Command::Open(args) = cli.command else {
+            panic!("expected open command");
+        };
+        assert_eq!(args.auth, Some(AuthMode::None));
+
+        let cli = Cli::parse_from([
+            "agbranch",
+            "agent",
+            "start",
+            "demo",
+            "--provider",
+            "gemini",
+            "--auth",
+            "ask",
+        ]);
+        let Command::Agent(args) = cli.command else {
+            panic!("expected agent command");
+        };
+        let AgentAction::Start(args) = args.action else {
+            panic!("expected agent start command");
+        };
+        assert_eq!(args.auth, Some(AuthMode::Ask));
     }
 }

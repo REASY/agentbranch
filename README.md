@@ -110,7 +110,7 @@ agbranch base prepare
 
 # Sandbox session — seeded, disposable, exit with --discard.
 # With --agent and no --json, agbranch attaches to the agent window immediately:
-agbranch launch --session scratch --seed ./input --agent claude
+agbranch launch --session scratch --seed ./input --agent claude --auth ask
 # Later, after detaching from tmux, re-enter with:
 agbranch attach scratch
 agbranch export scratch --from ~/sandbox/scratch --to ./artifacts
@@ -140,6 +140,7 @@ Use when you want a throwaway VM with some seed files and no expectation of merg
 - `launch --session <name>` clones the base VM and starts it.
 - `--seed <host-path>` copies a filtered host directory into `~/sandbox/<session>` in the guest. Built-in build/cache exclusions apply, and an optional `.agbranchignore` uses gitignore syntax for project-specific exclusions. Symlinks that resolve outside the seed root are rejected.
 - `--agent {codex|claude|gemini}` bootstraps the provider inside the VM and attaches to its tmux window.
+- `--auth {import|none|ask}` controls whether detected host credentials enter the guest.
 - `export --from ~/sandbox/<session> --to <host-path>` pulls artifacts out before you close.
 - `close --discard --yes` destroys the VM. Sandbox sessions **cannot** close with `--sync` — that's enforced, not advisory.
 
@@ -165,11 +166,13 @@ Use when the agent needs to see your repo's history and your host needs to merge
 
 Coding agents aren't installed on your host — they're installed in the prepared base and started *inside* the session VM as session-owned processes. `--agent {codex|claude|gemini}` on `launch`/`open` (or `agent start --provider` after the fact):
 
-1. imports the provider's config/auth from the host when available,
+1. imports the provider's config/auth from the host according to the selected auth policy,
 2. starts the provider in the session's tmux `agent` window,
 3. attaches you to that window in interactive mode, or returns metadata under `--json`.
 
-When auth/config is available, `agbranch` may import it into the guest after confirmation, and session-owned providers run inside the VM with permissive defaults. The VM boundary protects the host, not any credentials imported into the guest.
+Use `--auth import` to import detected credentials without a prompt, `--auth none` to start without importing them, or `--auth ask` to force a fresh prompt when credentials are detected. The choice is remembered independently for Codex, Claude, and Gemini; omitting `--auth` reuses that choice, or prompts once in an interactive terminal when no choice exists. Non-interactive launches with no remembered choice default to no import. Auth is resolved before the VM is cloned or started, so an interactive launch does not pause after boot.
+
+Session-owned providers run inside the VM with permissive defaults. The VM boundary protects the host, not any credentials imported into the guest.
 
 The readiness probe for the prepared base verifies `codex --version`, `claude --version`, `gemini --version`, Node `>= 20`, `tmux`, and `docker compose version` — so if `base prepare` completes, the runtime prerequisites for the supported agent CLIs are in place.
 

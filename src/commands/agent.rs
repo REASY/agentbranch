@@ -1,6 +1,7 @@
-use crate::cli::{AgentAction, AgentArgs, AttachArgs};
+use crate::cli::{AgentAction, AgentArgs, AttachArgs, AuthMode};
 use crate::db::connect::open_catalog;
 use crate::db::models::{AgentLaunchPreset, ProviderKind as StoredProviderKind};
+use crate::db::preferences::{remember_auth_import, remembered_auth_import};
 use crate::db::sessions::{find_session, update_agent_metadata};
 use crate::error::process::ProcessError;
 use crate::error::{AppError, ValidationError};
@@ -13,7 +14,6 @@ use crate::platform::host::HostContext;
 use crate::policy::secrets::render_guest_secret_file;
 use crate::provider::auth::{
     AuthPrompter, DetectedAuthSource, ImportedAuthMaterial, TerminalAuthPrompter, detect_auth,
-    select_auth_imports,
 };
 use crate::provider::bootstrap::{GeminiAuthMode, bootstrap_files_with_gemini_auth};
 use crate::provider::launch;
@@ -34,6 +34,15 @@ pub(crate) struct SessionOwnedAgentLaunch<'a> {
     pub(crate) agent_window_name: &'a str,
 }
 
+pub(crate) struct AuthImportRequest<'a> {
+    pub(crate) provider: ProviderKind,
+    pub(crate) host_platform: HostPlatform,
+    pub(crate) host_home: &'a std::path::Path,
+    pub(crate) host_env: &'a BTreeMap<String, String>,
+    pub(crate) requested_mode: Option<AuthMode>,
+    pub(crate) interactive: bool,
+}
+
 pub(crate) fn ensure_session_provider(
     existing: Option<StoredProviderKind>,
     requested: ProviderKind,
@@ -52,32 +61,85 @@ pub(crate) fn auth_prompt_enabled(json_mode: bool, stdin_tty: bool, stdout_tty: 
     !json_mode && stdin_tty && stdout_tty
 }
 
+pub(crate) fn resolve_auth_imports(
+    conn: &rusqlite::Connection,
+    provider: ProviderKind,
+    detection: &crate::provider::auth::DetectedAuth,
+    requested_mode: Option<AuthMode>,
+    interactive: bool,
+    prompter: &dyn AuthPrompter,
+) -> Result<Vec<DetectedAuthSource>, AppError> {
+    let import = match requested_mode {
+        Some(AuthMode::Import) => {
+            remember_auth_import(conn, provider, true)?;
+            true
+        }
+        Some(AuthMode::None) => {
+            remember_auth_import(conn, provider, false)?;
+            false
+        }
+        Some(AuthMode::Ask) => {
+            if detection.sources.is_empty() {
+                return Ok(Vec::new());
+            }
+            if !interactive {
+                return Err(ValidationError::AuthAskRequiresTerminal.into());
+            }
+            let import = prompter.confirm_import(provider, detection)?;
+            remember_auth_import(conn, provider, import)?;
+            import
+        }
+        None => match remembered_auth_import(conn, provider)? {
+            Some(import) => import,
+            None if detection.sources.is_empty() => false,
+            None if interactive => {
+                let import = prompter.confirm_import(provider, detection)?;
+                remember_auth_import(conn, provider, import)?;
+                import
+            }
+            None => false,
+        },
+    };
+
+    Ok(if import {
+        detection.sources.clone()
+    } else {
+        Vec::new()
+    })
+}
+
+pub(crate) fn detect_and_resolve_auth_imports(
+    conn: &rusqlite::Connection,
+    request: AuthImportRequest<'_>,
+    prompter: &dyn AuthPrompter,
+) -> Result<Vec<DetectedAuthSource>, AppError> {
+    let guest_home = crate::session::paths::guest_home_path(request.host_home);
+    let detected = detect_auth(
+        request.provider,
+        request.host_platform,
+        request.host_home,
+        request.host_env,
+        &guest_home,
+    );
+    resolve_auth_imports(
+        conn,
+        request.provider,
+        &detected,
+        request.requested_mode,
+        request.interactive,
+        prompter,
+    )
+}
+
 pub(crate) fn start_session_owned_agent_with(
     client: &dyn LimaClient,
     request: SessionOwnedAgentLaunch<'_>,
-    host_platform: HostPlatform,
-    host_env: &BTreeMap<String, String>,
-    interactive_auth_prompt: bool,
-    prompter: &dyn AuthPrompter,
+    selected_auth: &[DetectedAuthSource],
 ) -> Result<Vec<ImportedAuthMaterial>, AppError> {
     ensure_provider_binary_available(client, request.vm_name, request.provider)?;
-    let guest_home = crate::session::paths::guest_home_path(request.host_home);
-    let detected_auth = detect_auth(
-        request.provider,
-        host_platform,
-        request.host_home,
-        host_env,
-        &guest_home,
-    );
-    let selected_auth = select_auth_imports(
-        request.provider,
-        &detected_auth,
-        interactive_auth_prompt,
-        prompter,
-    )?;
-    install_provider_bootstrap_files(client, &request, selected_gemini_auth_mode(&selected_auth))?;
+    install_provider_bootstrap_files(client, &request, selected_gemini_auth_mode(selected_auth))?;
     let (imported_auth, guest_auth_env) =
-        materialize_auth_imports(client, &request, &selected_auth)?;
+        materialize_auth_imports(client, &request, selected_auth)?;
     let launch_line = launch::build_agent_shell_line(
         request.session_name.as_str(),
         request.workspace,
@@ -124,6 +186,22 @@ pub fn run(args: AgentArgs) -> Result<(), AppError> {
             let provider = ensure_session_provider(session.provider_kind, provider)?;
             let runner = RealCommandRunner;
             let lima = LimactlClient::new(&runner);
+            let selected_auth = detect_and_resolve_auth_imports(
+                &conn,
+                AuthImportRequest {
+                    provider,
+                    host_platform: host.platform,
+                    host_home: &host.home_dir,
+                    host_env: &std::env::vars().collect::<BTreeMap<_, _>>(),
+                    requested_mode: start.auth,
+                    interactive: auth_prompt_enabled(
+                        start.json,
+                        std::io::stdin().is_terminal(),
+                        std::io::stdout().is_terminal(),
+                    ),
+                },
+                &TerminalAuthPrompter,
+            )?;
             ensure_instance_running(&lima, &session.vm_name)?;
             let imported = start_session_owned_agent_with(
                 &lima,
@@ -136,14 +214,7 @@ pub fn run(args: AgentArgs) -> Result<(), AppError> {
                     shell_window_name: session.shell_window_name.as_deref().unwrap_or("shell"),
                     agent_window_name: session.agent_window_name.as_deref().unwrap_or("agent"),
                 },
-                host.platform,
-                &std::env::vars().collect::<BTreeMap<_, _>>(),
-                auth_prompt_enabled(
-                    start.json,
-                    std::io::stdin().is_terminal(),
-                    std::io::stdout().is_terminal(),
-                ),
-                &TerminalAuthPrompter,
+                &selected_auth,
             )?;
             let now = utc_now();
             let imported_json = serde_json::to_string(&imported)
@@ -348,22 +419,23 @@ fn ensure_provider_binary_available(
 mod tests {
     use super::{
         SessionOwnedAgentLaunch, auth_prompt_enabled, ensure_session_provider,
-        start_session_owned_agent_with,
+        resolve_auth_imports, start_session_owned_agent_with,
     };
+    use crate::cli::AuthMode;
+    use crate::db::connect::open_catalog;
     use crate::db::models::ProviderKind as StoredProviderKind;
     use crate::error::lima::LimaError;
     use crate::error::process::ProcessError;
     use crate::lima::client::LimaClient;
     use crate::lima::inspect::LimaInstance;
-    use crate::platform::detect::HostPlatform;
-    use crate::provider::auth::{AuthPrompter, DetectedAuth};
+    use crate::provider::auth::{AuthPrompter, DetectedAuth, DetectedAuthSource};
     use crate::session::paths::{claude_global_state_path, claude_settings_path};
     use crate::types::{
         DiskSize, GuestPath, HostPath, MemorySize, ProviderKind, SessionName, VmName,
     };
     use crate::util::process::CommandOutput;
     use std::cell::{Cell, RefCell};
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
     use tempfile::tempdir;
 
     #[derive(Default)]
@@ -512,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn start_in_noninteractive_mode_does_not_import_provider_auth() {
+    fn start_with_no_selected_auth_does_not_import_provider_auth() {
         let client = RecordingClient::default();
         let host_home = tempdir().expect("host home");
         let codex_dir = host_home.path().join(".codex");
@@ -534,13 +606,7 @@ mod tests {
                 shell_window_name: "shell",
                 agent_window_name: "agent",
             },
-            HostPlatform::Macos,
-            &BTreeMap::new(),
-            false,
-            &StubPrompter {
-                answer: true,
-                ..Default::default()
-            },
+            &[],
         )
         .expect("agent start should succeed");
 
@@ -551,24 +617,21 @@ mod tests {
                 .borrow()
                 .iter()
                 .any(|target| target.contains(".codex/auth.json")),
-            "noninteractive startup should not copy host auth into the guest by default"
+            "startup should not copy auth that was not selected"
         );
     }
 
     #[test]
-    fn start_in_interactive_mode_imports_selected_auth_before_launch() {
+    fn start_imports_selected_auth_before_launch() {
         let client = RecordingClient::default();
         let host_home = tempdir().expect("host home");
-        let mut env = BTreeMap::new();
-        env.insert("ANTHROPIC_API_KEY".to_owned(), "sk-ant-test".to_owned());
+        let selected = vec![DetectedAuthSource::EnvVar {
+            name: "ANTHROPIC_API_KEY".to_owned(),
+            value: "sk-ant-test".to_owned(),
+        }];
         let session = SessionName::try_from("demo").expect("session");
         let vm_name = VmName::new("agbranch-demo");
         let workspace = GuestPath::new("/home/tester.guest/workspaces/demo/repo");
-        let prompter = StubPrompter {
-            answer: true,
-            ..Default::default()
-        };
-
         let imported = start_session_owned_agent_with(
             &client,
             SessionOwnedAgentLaunch {
@@ -580,17 +643,13 @@ mod tests {
                 shell_window_name: "shell",
                 agent_window_name: "agent",
             },
-            HostPlatform::Macos,
-            &env,
-            true,
-            &prompter,
+            &selected,
         )
         .expect("agent start should succeed");
 
-        assert_eq!(prompter.called.get(), 1);
         assert!(
             !imported.is_empty(),
-            "interactive startup should import confirmed auth material"
+            "startup should import selected auth material"
         );
         assert!(
             client
@@ -621,10 +680,7 @@ mod tests {
                 shell_window_name: "shell",
                 agent_window_name: "agent",
             },
-            HostPlatform::Macos,
-            &BTreeMap::new(),
-            false,
-            &StubPrompter::default(),
+            &[],
         )
         .expect("agent start should succeed");
 
@@ -671,10 +727,7 @@ mod tests {
                 shell_window_name: "shell",
                 agent_window_name: "agent",
             },
-            HostPlatform::Macos,
-            &BTreeMap::new(),
-            false,
-            &StubPrompter::default(),
+            &[],
         )
         .expect("agent start should succeed");
 
@@ -693,6 +746,184 @@ mod tests {
         assert!(!auth_prompt_enabled(true, true, true));
         assert!(!auth_prompt_enabled(false, false, true));
         assert!(!auth_prompt_enabled(false, true, false));
+    }
+
+    fn detected_env_auth() -> DetectedAuth {
+        DetectedAuth {
+            sources: vec![DetectedAuthSource::EnvVar {
+                name: "ANTHROPIC_API_KEY".to_owned(),
+                value: "secret".to_owned(),
+            }],
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn explicit_auth_modes_are_noninteractive_and_remembered() {
+        let state = tempdir().expect("state");
+        let conn = open_catalog(&state.path().join("state.db")).expect("catalog");
+        let detection = detected_env_auth();
+        let prompter = StubPrompter {
+            answer: false,
+            ..Default::default()
+        };
+
+        let selected = resolve_auth_imports(
+            &conn,
+            ProviderKind::Claude,
+            &detection,
+            Some(AuthMode::Import),
+            false,
+            &prompter,
+        )
+        .expect("explicit import");
+        assert_eq!(selected, detection.sources);
+        assert_eq!(prompter.called.get(), 0);
+
+        let selected = resolve_auth_imports(
+            &conn,
+            ProviderKind::Claude,
+            &detection,
+            None,
+            false,
+            &prompter,
+        )
+        .expect("remembered import");
+        assert_eq!(selected, detection.sources);
+
+        let selected = resolve_auth_imports(
+            &conn,
+            ProviderKind::Claude,
+            &detection,
+            Some(AuthMode::None),
+            false,
+            &prompter,
+        )
+        .expect("explicit none");
+        assert!(selected.is_empty());
+
+        let selected = resolve_auth_imports(
+            &conn,
+            ProviderKind::Claude,
+            &detection,
+            None,
+            true,
+            &prompter,
+        )
+        .expect("remembered none");
+        assert!(selected.is_empty());
+        assert_eq!(prompter.called.get(), 0);
+    }
+
+    #[test]
+    fn first_interactive_choice_is_remembered_per_provider() {
+        let state = tempdir().expect("state");
+        let conn = open_catalog(&state.path().join("state.db")).expect("catalog");
+        let detection = detected_env_auth();
+        let yes = StubPrompter {
+            answer: true,
+            ..Default::default()
+        };
+
+        let first = resolve_auth_imports(&conn, ProviderKind::Claude, &detection, None, true, &yes)
+            .expect("first choice");
+        assert_eq!(first, detection.sources);
+        assert_eq!(yes.called.get(), 1);
+
+        let no = StubPrompter {
+            answer: false,
+            ..Default::default()
+        };
+        let repeated =
+            resolve_auth_imports(&conn, ProviderKind::Claude, &detection, None, true, &no)
+                .expect("remembered choice");
+        assert_eq!(repeated, detection.sources);
+        assert_eq!(no.called.get(), 0);
+
+        let other_provider =
+            resolve_auth_imports(&conn, ProviderKind::Gemini, &detection, None, true, &no)
+                .expect("other provider choice");
+        assert!(other_provider.is_empty());
+        assert_eq!(no.called.get(), 1);
+    }
+
+    #[test]
+    fn explicit_ask_reprompts_and_requires_a_terminal() {
+        let state = tempdir().expect("state");
+        let conn = open_catalog(&state.path().join("state.db")).expect("catalog");
+        let detection = detected_env_auth();
+        let prompter = StubPrompter {
+            answer: false,
+            ..Default::default()
+        };
+
+        let err = resolve_auth_imports(
+            &conn,
+            ProviderKind::Codex,
+            &detection,
+            Some(AuthMode::Ask),
+            false,
+            &prompter,
+        )
+        .expect_err("ask should require a terminal");
+        assert!(err.to_string().contains("--auth ask requires"));
+        assert_eq!(prompter.called.get(), 0);
+
+        let selected = resolve_auth_imports(
+            &conn,
+            ProviderKind::Codex,
+            &detection,
+            Some(AuthMode::Ask),
+            true,
+            &prompter,
+        )
+        .expect("interactive ask");
+        assert!(selected.is_empty());
+        assert_eq!(prompter.called.get(), 1);
+    }
+
+    #[test]
+    fn ask_with_no_detected_auth_does_not_replace_a_remembered_choice() {
+        let state = tempdir().expect("state");
+        let conn = open_catalog(&state.path().join("state.db")).expect("catalog");
+        let detection = detected_env_auth();
+        let prompter = StubPrompter::default();
+        resolve_auth_imports(
+            &conn,
+            ProviderKind::Codex,
+            &detection,
+            Some(AuthMode::Import),
+            false,
+            &prompter,
+        )
+        .expect("remember import");
+
+        let empty = DetectedAuth {
+            sources: Vec::new(),
+            notes: Vec::new(),
+        };
+        let selected = resolve_auth_imports(
+            &conn,
+            ProviderKind::Codex,
+            &empty,
+            Some(AuthMode::Ask),
+            false,
+            &prompter,
+        )
+        .expect("nothing to ask");
+        assert!(selected.is_empty());
+
+        let selected = resolve_auth_imports(
+            &conn,
+            ProviderKind::Codex,
+            &detection,
+            None,
+            false,
+            &prompter,
+        )
+        .expect("remembered import");
+        assert_eq!(selected, detection.sources);
+        assert_eq!(prompter.called.get(), 0);
     }
 
     #[test]
@@ -715,13 +946,7 @@ mod tests {
                 shell_window_name: "shell",
                 agent_window_name: "agent",
             },
-            HostPlatform::Macos,
-            &BTreeMap::new(),
-            false,
-            &StubPrompter {
-                called: Cell::new(0),
-                answer: true,
-            },
+            &[],
         )
         .expect_err("missing provider binary should block startup");
 

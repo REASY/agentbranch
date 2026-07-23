@@ -93,7 +93,11 @@ impl AuthPrompter for TerminalAuthPrompter {
         for note in &detection.notes {
             writeln!(stderr, "note: {note}")?;
         }
-        write!(stderr, "import this auth into the guest session? [y/N] ")?;
+        write!(
+            stderr,
+            "import this auth into future {} guest sessions? [y/N] ",
+            provider.as_str()
+        )?;
         stderr.flush()?;
 
         let mut input = String::new();

@@ -117,6 +117,9 @@ pub enum ValidationError {
     #[error("unsupported provider")]
     UnsupportedProvider,
 
+    #[error("--auth ask requires an interactive terminal; use `--auth import` or `--auth none`")]
+    AuthAskRequiresTerminal,
+
     #[error(
         "provider CLI `{name}` is unavailable in the prepared base; \
          run `agbranch base prepare --rebuild`"

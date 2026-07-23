@@ -1,6 +1,7 @@
 use crate::cli::LaunchArgs;
 use crate::commands::agent::{
-    SessionOwnedAgentLaunch, auth_prompt_enabled, start_session_owned_agent_with,
+    AuthImportRequest, SessionOwnedAgentLaunch, auth_prompt_enabled,
+    detect_and_resolve_auth_imports, start_session_owned_agent_with,
 };
 use crate::commands::base::{acquire_clone_lock_for_prepared_base, emit_prepared_base_notice};
 use crate::commands::session_slot::ensure_runtime_session_slot_available;
@@ -84,6 +85,27 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
     let now = utc_now();
     let record = build_launch_record(&host.home_dir, &session_name, seed.as_ref(), provider);
     ensure_runtime_session_slot_available(&catalog, &session_name, &vm_name)?;
+    let host_env = std::env::vars().collect::<BTreeMap<_, _>>();
+    let selected_auth = provider
+        .map(|provider| {
+            detect_and_resolve_auth_imports(
+                &catalog,
+                AuthImportRequest {
+                    provider,
+                    host_platform: host.platform,
+                    host_home: &host.home_dir,
+                    host_env: &host_env,
+                    requested_mode: args.auth,
+                    interactive: auth_prompt_enabled(
+                        args.json,
+                        std::io::stdin().is_terminal(),
+                        std::io::stdout().is_terminal(),
+                    ),
+                },
+                &crate::provider::auth::TerminalAuthPrompter,
+            )
+        })
+        .transpose()?;
 
     insert_session(&catalog, &record)?;
     let lock_guard =
@@ -198,14 +220,7 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
                             shell_window_name: "shell",
                             agent_window_name: "agent",
                         },
-                        host.platform,
-                        &std::env::vars().collect::<BTreeMap<_, _>>(),
-                        auth_prompt_enabled(
-                            args.json,
-                            std::io::stdin().is_terminal(),
-                            std::io::stdout().is_terminal(),
-                        ),
-                        &crate::provider::auth::TerminalAuthPrompter,
+                        selected_auth.as_deref().unwrap_or_default(),
                     )
                 },
             )?;

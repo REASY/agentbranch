@@ -3,8 +3,14 @@ use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 use std::sync::LazyLock;
 
-static MIGRATIONS: LazyLock<Migrations<'static>> =
-    LazyLock::new(|| Migrations::new(vec![M::up(include_str!("../../migrations/0001_init.sql"))]));
+static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
+    Migrations::new(vec![
+        M::up(include_str!("../../migrations/0001_init.sql")),
+        M::up(include_str!(
+            "../../migrations/0002_provider_preferences.sql"
+        )),
+    ])
+});
 
 pub fn run(conn: &mut Connection) -> Result<(), DbError> {
     MIGRATIONS.to_latest(conn).map_err(DbError::from)
@@ -26,7 +32,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .expect("read user_version");
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
 
         let has_sessions: bool = conn
             .query_row(
@@ -50,7 +56,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .expect("read user_version");
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 
     #[test]
@@ -83,5 +89,58 @@ mod tests {
         );
         assert!(names.iter().any(|n| n == "name"));
         assert!(names.iter().any(|n| n == "session_mode"));
+    }
+
+    #[test]
+    fn new_schema_has_provider_preferences() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("state.db");
+        let mut conn = Connection::open(&path).expect("open");
+        run(&mut conn).expect("migrate");
+
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'provider_preferences'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        assert!(exists);
+    }
+
+    #[test]
+    fn version_one_catalog_upgrades_without_recreating_sessions() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("state.db");
+        let mut conn = Connection::open(&path).expect("open");
+        conn.execute_batch(include_str!("../../migrations/0001_init.sql"))
+            .expect("create version one schema");
+        conn.pragma_update(None, "user_version", 1)
+            .expect("stamp version one");
+
+        run(&mut conn).expect("upgrade");
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, 2);
+        let sessions_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        let preferences_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'provider_preferences'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        assert!(sessions_exists);
+        assert!(preferences_exists);
     }
 }
