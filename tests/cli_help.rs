@@ -21,6 +21,7 @@ fn help_lists_the_expected_subcommands() {
             .and(predicate::str::contains("logs"))
             .and(predicate::str::contains("watch"))
             .and(predicate::str::contains("repair"))
+            .and(predicate::str::contains("retry"))
             .and(predicate::str::contains("doctor")),
     );
 }

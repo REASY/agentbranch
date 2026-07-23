@@ -224,6 +224,11 @@ impl<'a> SessionGuard<'a> {
         self.cleanup.take();
     }
 
+    /// Keep the catalog row and VM so a checkpointed launch can be resumed.
+    pub fn preserve(mut self) {
+        self.cleanup.take();
+    }
+
     pub fn rollback(mut self, original: AppError) -> AppError {
         let Some(cleanup) = self.cleanup.take() else {
             return original;
@@ -444,6 +449,24 @@ mod tests {
 
         let row = find_session(&conn, &session).expect("find");
         assert!(row.is_some(), "session should survive commit");
+    }
+
+    #[test]
+    fn session_guard_preserve_keeps_retryable_state() {
+        let dir = tempdir().expect("tempdir");
+        let conn = open_catalog(&dir.path().join("state.db")).expect("catalog");
+        let session = SessionName::try_from("demo-preserve").expect("session");
+        let vm = VmName::for_session(&session);
+        seed_session(&conn, &session, &vm);
+
+        let runner = RealCommandRunner;
+        {
+            let guard = SessionGuard::launch(&runner, &conn, &session, &vm);
+            guard.preserve();
+        }
+
+        let row = find_session(&conn, &session).expect("find");
+        assert!(row.is_some(), "session should survive preservation");
     }
 
     #[test]

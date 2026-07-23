@@ -6,6 +6,7 @@ use crate::commands::agent::{
 use crate::commands::base::{acquire_clone_lock_for_prepared_base, emit_prepared_base_notice};
 use crate::commands::session_slot::ensure_runtime_session_slot_available;
 use crate::db::connect::open_catalog;
+use crate::db::launch_retries::delete_launch_retry;
 use crate::db::locks::SessionLock;
 use crate::db::models::{AgentLaunchPreset, LifecycleState, SessionMode};
 use crate::db::ports::insert_session_ports;
@@ -18,6 +19,10 @@ use crate::platform::host::HostContext;
 use crate::policy::artifacts::{ArtifactPolicy, FilteredSeedTree};
 use crate::ports::{PublishedPort, validate_published_ports};
 use crate::session::guest_support;
+use crate::session::launch_retry::{
+    AGENT_STARTED, GUEST_SUPPORT_INSTALLED, PORTS_CONFIGURED, SHELL_READY, VM_CLONED, VM_STARTED,
+    WORKSPACE_SEEDED, checkpoint, preserve_failure,
+};
 use crate::session::orchestration::{
     LockMetadataGuard, OperationTimings, SessionGuard, TimingSummary, run_step,
 };
@@ -141,6 +146,7 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
 
     let guard = SessionGuard::launch(&runner, &catalog, &session_name, &vm_name);
 
+    let mut retryable = false;
     let result: Result<(), AppError> = (|| {
         let base_clone_lock = run_step(&session_name, "launch", "prepare-base", &timings, || {
             let mut on_notice =
@@ -163,14 +169,36 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
             )?)
         })?;
         drop(base_clone_lock);
+        checkpoint(&catalog, &session_name, VM_CLONED)?;
+        retryable = true;
+        update_lifecycle_state_with_timestamps(
+            &catalog,
+            &session_name,
+            LifecycleState::Starting,
+            &utc_now(),
+            None,
+            None,
+            None,
+        )?;
         if !args.publish.is_empty() {
             run_step(&session_name, "launch", "configure-ports", &timings, || {
                 Ok(lima.configure_port_forwards(&vm_name, &args.publish)?)
             })?;
         }
+        checkpoint(&catalog, &session_name, PORTS_CONFIGURED)?;
         run_step(&session_name, "launch", "start-vm", &timings, || {
             Ok(lima.start_instance(&vm_name)?)
         })?;
+        checkpoint(&catalog, &session_name, VM_STARTED)?;
+        update_lifecycle_state_with_timestamps(
+            &catalog,
+            &session_name,
+            LifecycleState::Seeding,
+            &utc_now(),
+            None,
+            None,
+            None,
+        )?;
         run_step(
             &session_name,
             "launch",
@@ -185,6 +213,7 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
                 )?)
             },
         )?;
+        checkpoint(&catalog, &session_name, GUEST_SUPPORT_INSTALLED)?;
         run_step(&session_name, "launch", "ensure-shell", &timings, || {
             Ok(guest_support::ensure_workspace_and_shell(
                 &lima,
@@ -197,6 +226,7 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
                 &workspace,
             )?)
         })?;
+        checkpoint(&catalog, &session_name, SHELL_READY)?;
         if let Some(seed) = seed.as_ref() {
             run_step(&session_name, "launch", "seed-workspace", &timings, || {
                 let policy = ArtifactPolicy::load(seed.as_path())?;
@@ -208,15 +238,7 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
                 )?)
             })?;
         }
-        update_lifecycle_state_with_timestamps(
-            &catalog,
-            &session_name,
-            LifecycleState::Running,
-            &now,
-            Some(&now),
-            None,
-            None,
-        )?;
+        checkpoint(&catalog, &session_name, WORKSPACE_SEEDED)?;
         if let Some(provider) = provider {
             let imported = run_step(&session_name, "launch", "launch-agent", &timings, || {
                 start_session_owned_agent_with(
@@ -248,12 +270,32 @@ pub fn run(args: LaunchArgs) -> Result<(), AppError> {
                 &now,
             )?;
         }
-        run_step(&session_name, "launch", "finalize", &timings, || Ok(()))?;
+        checkpoint(&catalog, &session_name, AGENT_STARTED)?;
+        run_step(&session_name, "launch", "finalize", &timings, || {
+            let finished_at = utc_now();
+            update_lifecycle_state_with_timestamps(
+                &catalog,
+                &session_name,
+                LifecycleState::Running,
+                &finished_at,
+                Some(&finished_at),
+                None,
+                None,
+            )?;
+            delete_launch_retry(&catalog, &session_name)?;
+            Ok(())
+        })?;
         Ok(())
     })();
 
     match result {
         Ok(()) => guard.commit(),
+        Err(err) if retryable => {
+            let retry_err = preserve_failure(&catalog, &session_name, &err);
+            guard.preserve();
+            lock_guard.commit()?;
+            return Err(retry_err?);
+        }
         Err(err) => return Err(guard.rollback(err)),
     }
 

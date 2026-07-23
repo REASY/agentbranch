@@ -1,5 +1,6 @@
 pub mod connect;
 pub mod events;
+pub mod launch_retries;
 pub mod locks;
 pub mod migrate;
 pub mod models;

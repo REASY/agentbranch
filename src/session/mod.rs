@@ -1,5 +1,6 @@
 pub mod exec;
 pub mod guest_support;
+pub mod launch_retry;
 pub mod orchestration;
 pub mod paths;
 pub mod reconcile;

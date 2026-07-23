@@ -39,6 +39,15 @@ pub enum ValidationError {
     #[error("session `{0}` was not found")]
     SessionNotFound(String),
 
+    #[error("session `{name}` has no interrupted launch to retry")]
+    LaunchRetryUnavailable { name: String },
+
+    #[error(
+        "session `{name}` has unsupported launch checkpoint `{checkpoint}`; \
+         upgrade agbranch or close and relaunch the session"
+    )]
+    InvalidLaunchCheckpoint { name: String, checkpoint: String },
+
     #[error(
         "session `{name}` already exists in the local catalog (state: {state}, sync: {sync}); \
          choose a different session name"

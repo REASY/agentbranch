@@ -39,6 +39,8 @@ pub enum Command {
     Logs(LogsArgs),
     Watch(WatchArgs),
     Repair(SessionArgs),
+    /// Resume a launch from its last completed phase.
+    Retry(RetryArgs),
     Doctor(JsonFlag),
     /// Internal / troubleshooting subcommands. Hidden from top-level help
     /// but visible via `agbranch internal --help`.
@@ -146,6 +148,14 @@ pub struct OpenArgs {
     pub memory: Option<MemorySize>,
     #[arg(long)]
     pub disk: Option<DiskSize>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RetryArgs {
+    #[command(flatten)]
+    pub session: SessionSelector,
     #[arg(long)]
     pub json: bool,
 }
@@ -539,6 +549,22 @@ mod tests {
         };
         assert_eq!(args.session.resolve().expect("session"), "demo");
         assert!(args.json);
+    }
+
+    #[test]
+    fn retry_accepts_positional_or_flag_session() {
+        let cli = Cli::parse_from(["agbranch", "retry", "demo", "--json"]);
+        let Command::Retry(args) = cli.command else {
+            panic!("expected retry");
+        };
+        assert_eq!(args.session.resolve().expect("session"), "demo");
+        assert!(args.json);
+
+        let cli = Cli::parse_from(["agbranch", "retry", "--session", "flagged"]);
+        let Command::Retry(args) = cli.command else {
+            panic!("expected retry");
+        };
+        assert_eq!(args.session.resolve().expect("session"), "flagged");
     }
 
     #[test]

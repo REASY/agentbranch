@@ -8,6 +8,7 @@ Every `agbranch` subcommand, grouped by what you're trying to do. For full flag 
 |               | `doctor`                 | Validate host: `limactl` version, platform prerequisites, orphaned VMs.                      |
 | **Create**    | `launch`                 | Start a sandbox session, optionally `--seed`, `--agent`, and `--auth`.                       |
 |               | `open`                   | Start a git-native repo session, optionally `--base`, `--agent`, and `--auth`.               |
+|               | `retry`                  | Resume a post-clone launch failure from its last completed phase.                            |
 | **Inspect**   | `ps`                     | List sessions with live status; `--all`, `--search`, `--state`, `--sort`.                    |
 |               | `ports`                  | List published localhost ports and whether guest services are listening.                     |
 |               | `base show`              | Show the current prepared base VM, readiness, fingerprint, and sizing (`--json`).            |
@@ -37,6 +38,8 @@ For `launch --agent`, `open --agent`, and `agent start`, `--auth import` imports
 ## Launch and open timings
 
 Each `launch` and `open` phase is announced immediately, then reports elapsed phase and total time with millisecond precision when it completes. Human output ends with an ordered phase breakdown, each phase's percentage of wall time, and the slowest phase. The `start-vm` measurement covers the complete `limactl start` call, including Lima waiting for the guest to become ready.
+
+After the VM clone completes, launch checkpoints are persisted after every safe phase. A later failure keeps the session and VM and prints `agbranch retry SESSION`; retry skips completed phases and can itself be run repeatedly. A failure before cloning completes is rolled back because there is no reusable VM yet.
 
 With `--json`, the same data is returned as:
 

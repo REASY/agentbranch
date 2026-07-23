@@ -10,6 +10,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
             "../../migrations/0002_provider_preferences.sql"
         )),
         M::up(include_str!("../../migrations/0003_session_ports.sql")),
+        M::up(include_str!("../../migrations/0004_launch_retries.sql")),
     ])
 });
 
@@ -33,7 +34,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .expect("read user_version");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
 
         let has_sessions: bool = conn
             .query_row(
@@ -57,7 +58,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .expect("read user_version");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]
@@ -125,7 +126,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         let sessions_exists: bool = conn
             .query_row(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions'",
@@ -156,6 +157,24 @@ mod tests {
             .query_row(
                 "SELECT 1 FROM sqlite_master
                  WHERE type = 'table' AND name = 'session_ports'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        assert!(exists);
+    }
+
+    #[test]
+    fn new_schema_has_launch_retries() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("state.db");
+        let mut conn = Connection::open(&path).expect("open");
+        run(&mut conn).expect("migrate");
+
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'session_launch_retries'",
                 [],
                 |_| Ok(true),
             )

@@ -6,8 +6,9 @@ use crate::commands::agent::{
 use crate::commands::base::{acquire_clone_lock_for_prepared_base, emit_prepared_base_notice};
 use crate::commands::session_slot::ensure_runtime_session_slot_available;
 use crate::db::connect::open_catalog;
+use crate::db::launch_retries::delete_launch_retry;
 use crate::db::locks::SessionLock;
-use crate::db::models::{AgentLaunchPreset, RepoSyncMode, SessionMode};
+use crate::db::models::{AgentLaunchPreset, LifecycleState, RepoSyncMode, SessionMode};
 use crate::db::ports::insert_session_ports;
 use crate::db::sessions::{
     InsertSession, insert_session, update_agent_metadata, update_lifecycle_state_with_timestamps,
@@ -24,6 +25,10 @@ use crate::lima::shell;
 use crate::platform::host::HostContext;
 use crate::ports::{PublishedPort, validate_published_ports};
 use crate::session::guest_support;
+use crate::session::launch_retry::{
+    AGENT_STARTED, GIT_IDENTITY_CONFIGURED, GUEST_SUPPORT_INSTALLED, PORTS_CONFIGURED, SHELL_READY,
+    VM_CLONED, VM_STARTED, WORKSPACE_SEEDED, checkpoint, preserve_failure,
+};
 use crate::session::orchestration::{
     LockMetadataGuard, OperationTimings, SessionGuard, TimingSummary, run_step,
 };
@@ -186,6 +191,16 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
     }
     let lock_guard =
         LockMetadataGuard::acquire(&catalog, &session_name, std::process::id(), "open")?;
+    let guard = SessionGuard::open(
+        &runner,
+        &catalog,
+        &session_name,
+        &vm_name,
+        git_root.as_path(),
+        &hidden_refs.base,
+        &hidden_refs.head,
+        &review_branch,
+    );
     eprintln!(
         "{}",
         render_open_repo_progress(
@@ -220,17 +235,7 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
         },
     )?;
 
-    let guard = SessionGuard::open(
-        &runner,
-        &catalog,
-        &session_name,
-        &vm_name,
-        git_root.as_path(),
-        &hidden_refs.base,
-        &hidden_refs.head,
-        &review_branch,
-    );
-
+    let mut retryable = false;
     let result: Result<(), AppError> = (|| {
         let seed_clone = run_step(&session_name, "open", "seed-repo-clone", &timings, || {
             create_git_seed_clone(
@@ -262,14 +267,36 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
             )?)
         })?;
         drop(base_clone_lock);
+        checkpoint(&catalog, &session_name, VM_CLONED)?;
+        retryable = true;
+        update_lifecycle_state_with_timestamps(
+            &catalog,
+            &session_name,
+            LifecycleState::Starting,
+            &utc_now(),
+            None,
+            None,
+            None,
+        )?;
         if !args.publish.is_empty() {
             run_step(&session_name, "open", "configure-ports", &timings, || {
                 Ok(lima.configure_port_forwards(&vm_name, &args.publish)?)
             })?;
         }
+        checkpoint(&catalog, &session_name, PORTS_CONFIGURED)?;
         run_step(&session_name, "open", "start-vm", &timings, || {
             Ok(lima.start_instance(&vm_name)?)
         })?;
+        checkpoint(&catalog, &session_name, VM_STARTED)?;
+        update_lifecycle_state_with_timestamps(
+            &catalog,
+            &session_name,
+            LifecycleState::Seeding,
+            &utc_now(),
+            None,
+            None,
+            None,
+        )?;
         run_step(
             &session_name,
             "open",
@@ -284,9 +311,11 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
                 )?)
             },
         )?;
+        checkpoint(&catalog, &session_name, GUEST_SUPPORT_INSTALLED)?;
         run_step(&session_name, "open", "seed-repo", &timings, || {
             Ok(lima.seed_repo(seed_clone.path(), &vm_name, &guest_repo)?)
         })?;
+        checkpoint(&catalog, &session_name, WORKSPACE_SEEDED)?;
         run_step(&session_name, "open", "ensure-shell", &timings, || {
             Ok(guest_support::ensure_workspace_and_shell(
                 &lima,
@@ -296,6 +325,7 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
                 &guest_repo,
             )?)
         })?;
+        checkpoint(&catalog, &session_name, SHELL_READY)?;
         run_step(
             &session_name,
             "open",
@@ -303,6 +333,7 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
             &timings,
             || configure_guest_identity(&runner, &vm_name, &guest_repo, &identity),
         )?;
+        checkpoint(&catalog, &session_name, GIT_IDENTITY_CONFIGURED)?;
         if let Some(provider) = provider {
             let imported = run_step(&session_name, "open", "launch-agent", &timings, || {
                 start_session_owned_agent_with(
@@ -334,6 +365,7 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
                 &now,
             )?;
         }
+        checkpoint(&catalog, &session_name, AGENT_STARTED)?;
 
         run_step(&session_name, "open", "finalize", &timings, || {
             Ok(update_lifecycle_state_with_timestamps(
@@ -346,11 +378,18 @@ pub fn run(args: OpenArgs) -> Result<(), AppError> {
                 None,
             )?)
         })?;
+        delete_launch_retry(&catalog, &session_name)?;
         Ok(())
     })();
 
     match result {
         Ok(()) => guard.commit(),
+        Err(err) if retryable => {
+            let retry_err = preserve_failure(&catalog, &session_name, &err);
+            guard.preserve();
+            lock_guard.commit()?;
+            return Err(retry_err?);
+        }
         Err(err) => return Err(guard.rollback(err)),
     }
 
@@ -393,7 +432,7 @@ fn guest_repo_path(host_home_dir: &Path, session: &SessionName) -> GuestPath {
     repo_workspace_path(host_home_dir, session)
 }
 
-fn configure_guest_identity(
+pub(crate) fn configure_guest_identity(
     runner: &RealCommandRunner,
     vm_name: &crate::types::VmName,
     repo_guest_path: &GuestPath,
@@ -479,12 +518,12 @@ fn git_ref_exists(
     }
 }
 
-struct SeedClone {
+pub(crate) struct SeedClone {
     path: HostPath,
 }
 
 impl SeedClone {
-    fn path(&self) -> &HostPath {
+    pub(crate) fn path(&self) -> &HostPath {
         &self.path
     }
 }
@@ -495,7 +534,7 @@ impl Drop for SeedClone {
     }
 }
 
-fn create_git_seed_clone(
+pub(crate) fn create_git_seed_clone(
     runner: &dyn CommandRunner,
     staging_root: &Path,
     repo_root: &HostPath,

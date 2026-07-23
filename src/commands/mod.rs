@@ -14,6 +14,7 @@ pub mod ports;
 pub mod prepare;
 pub mod ps;
 pub mod repair;
+pub mod retry;
 pub mod run;
 pub(crate) mod session_slot;
 pub mod shell;
